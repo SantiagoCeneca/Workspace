@@ -314,7 +314,10 @@ const App=(()=>{
   let _root=null;
   async function init(){
     await Auth.init();
-    document.getElementById('signin').addEventListener('click',()=>Auth.signIn());
+    document.getElementById('signin').addEventListener('click',()=>{
+  if(_tokenClient){_tokenClient.requestAccessToken({prompt:'consent'});}
+  else{Auth.signIn();}
+});
     document.getElementById('signout').addEventListener('click',()=>Auth.signOut());
     document.getElementById('modal').addEventListener('click',e=>{if(e.target===document.getElementById('modal'))closeModal();});
     if(localStorage.getItem('ws_user')&&localStorage.getItem('ws_token'))Auth.signIn();
