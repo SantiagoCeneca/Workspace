@@ -253,8 +253,160 @@ el.innerHTML=f.map(t=>{const ov=!t.done&&t.fecha&&t.fecha<hoy,cl=Data.getCliente
 async toggle(id){const t=Data.getTareas().find(t=>t.id===id);if(t)await Data.actualizarTarea(id,{done:!t.done});Vistas.ir(Vistas.cur());},
 async eliminar(id){if(!confirm('¿Eliminar esta tarea?'))return;await Data.eliminarTarea(id);Vistas.ir(Vistas.cur());App.toast('Tarea eliminada');},
 setFiltro(f){this._filtro=f;this.render(document.getElementById('main'));},
-nueva(){const cs=Data.getClientes();App.modal('Nueva tarea',`<div class="fg"><label class="fl">Título</label><input class="fi" id="mt" placeholder="Descripción de la tarea..." /></div><div class="fg"><label class="fl">Cliente</label><select class="fi" id="mc"><option value="">Sin cliente</option>${cs.map(c=>`<option value="${c.id}">${c.emoji} ${c.nombre}</option>`).join('')}</select></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="fg"><label class="fl">Fecha límite</label><input type="date" class="fi" id="mf" /></div><div class="fg"><label class="fl">Asignar a</label><select class="fi" id="ma"><option value="ambos">Ambos</option><option value="santiago">Santiago</option><option value="elizabeth">Elizabeth</option></select></div></div><div class="fg"><label class="fl">Prioridad</label><select class="fi" id="mp"><option value="normal">Normal</option><option value="alta">Alta</option><option value="baja">Baja</option></select></div>`,async()=>{const t=document.getElementById('mt').value.trim();if(!t){App.toast('Escribe un título');return false;}const nuevaTarea=await Data.agregarTarea({titulo:t,clienteId:parseInt(document.getElementById('mc').value)||null,fecha:document.getElementById('mf').value||null,asignado:document.getElementById('ma').value,prioridad:document.getElementById('mp').value});if(nuevaTarea.fecha)agregarTareaACalendario(nuevaTarea);Vistas.ir(Vistas.cur());App.toast('Tarea agregada ✓');});},
+nueva(){const cs=Data.getClientes();App.modal('Nueva tarea',`<div class="fg"><label class="fl">Título</label><input class="fi" id="mt" placeholder="Descripción de la tarea..." /></div><div class="fg"><label class="fl">Cliente</label><select class="fi" id="mc"><option value="">Sin cliente</option>${cs.map(c=>`<option value="${c.id}">${c.emoji} ${c.nombre}</option>`).join('')}</select></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="fg"><label class="fl">Fecha límite</label><input type="date" class="fi" id="mf" /></div><div class="fg"><label class="fl">Asignar a</label><select class="fi" id="ma"><option value="ambos">Ambos</option><option value="santiago">Santiago</option><option value="elizabeth">Elizabeth</option></select></div></div><div class="fg"><label class="fl">Prioridad</label><select class="fi" id="mp"><option value="normal">Normal</option><option value="alta">Alta</option><option value="baja">Baja</option></select></div>`,async()=>{const t=document.getElementById('mt').value.trim();if(!t){App.toast('Escribe un título');return false;}const nuevaTarea=await Data.agregarTarea({titulo:t,clienteId:parseInt(document.getElementById('mc').value)||null,fecha:document.getElementById('mf').value||null,asignado:document.getElementById('ma').value,prioridad:document.getElementById('mp').value});if(nuevaTarea?.fecha)agregarTareaACalendario(nuevaTarea);Vistas.ir(Vistas.cur());App.toast('Tarea agregada ✓');});},
 editar(id){const t=Data.getTareas().find(t=>t.id===id);if(!t)return;const cs=Data.getClientes();App.modal('Editar tarea',`<div class="fg"><label class="fl">Título</label><input class="fi" id="mt" value="${U.esc(t.titulo)}" /></div><div class="fg"><label class="fl">Cliente</label><select class="fi" id="mc"><option value="">Sin cliente</option>${cs.map(c=>`<option value="${c.id}" ${t.clienteId===c.id?'selected':''}>${c.emoji} ${c.nombre}</option>`).join('')}</select></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="fg"><label class="fl">Fecha límite</label><input type="date" class="fi" id="mf" value="${t.fecha||''}" /></div><div class="fg"><label class="fl">Asignar a</label><select class="fi" id="ma"><option value="ambos" ${t.asignado==='ambos'?'selected':''}>Ambos</option><option value="santiago" ${t.asignado==='santiago'?'selected':''}>Santiago</option><option value="elizabeth" ${t.asignado==='elizabeth'?'selected':''}>Elizabeth</option></select></div></div><div class="fg"><label class="fl">Prioridad</label><select class="fi" id="mp"><option value="normal" ${t.prioridad==='normal'?'selected':''}>Normal</option><option value="alta" ${t.prioridad==='alta'?'selected':''}>Alta</option><option value="baja" ${t.prioridad==='baja'?'selected':''}>Baja</option></select></div>`,async()=>{await Data.actualizarTarea(id,{titulo:document.getElementById('mt').value.trim(),clienteId:parseInt(document.getElementById('mc').value)||null,fecha:document.getElementById('mf').value||null,asignado:document.getElementById('ma').value,prioridad:document.getElementById('mp').value});Vistas.ir(Vistas.cur());App.toast('Tarea actualizada');});}};
+
+
+// ---------- VISTA: CALENDARIO (Personal + Ceneca compartido) ----------
+const Calendario={
+  _a:new Date().getFullYear(),_m:new Date().getMonth(),_eventos:[],_eventosCeneca:[],
+  async render(el){
+    el.innerHTML=`<div class="view active">
+      <div class="ph"><div><div class="pt">Calendario</div><div class="psub">Tu calendario personal + Ceneca</div></div>
+      <button class="btn btnp" onclick="Tareas.nueva()">+ Nueva tarea</button></div>
+      <div style="display:flex;gap:8px;margin-bottom:16px">
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)"><div style="width:12px;height:12px;border-radius:3px;background:var(--accent)"></div>Tareas</div>
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)"><div style="width:12px;height:12px;border-radius:3px;background:var(--blue)"></div>Tu calendario</div>
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)"><div style="width:12px;height:12px;border-radius:3px;background:#9B59B6"></div>Ceneca (compartido)</div>
+      </div>
+      <div class="card">
+        <div class="calnav"><button class="cnb" onclick="Calendario.prev()">‹</button><div class="cmt" id="cmt"></div><button class="cnb" onclick="Calendario.next()">›</button></div>
+        <div class="calh">${['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'].map(d=>`<div>${d}</div>`).join('')}</div>
+        <div class="calg" id="calg"><div style="text-align:center;padding:40px;color:var(--text3);grid-column:1/-1">Cargando...</div></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
+        <div class="card">
+          <div class="slabel">Próximos eventos — Ceneca</div>
+          <div id="eventos-ceneca"><div style="color:var(--text3);font-size:13px">Cargando...</div></div>
+        </div>
+        <div class="card">
+          <div class="slabel">Tu calendario personal</div>
+          <div id="eventos-personal"><div style="color:var(--text3);font-size:13px">Cargando...</div></div>
+        </div>
+      </div>
+    </div>`;
+    await this._cargarEventos();
+    this._grid();
+  },
+  async _cargarEventos(){
+    try{
+      const token=Auth.getToken();
+      const inicio=new Date(this._a,this._m,1).toISOString();
+      const fin=new Date(this._a,this._m+1,0,23,59,59).toISOString();
+      const params=`timeMin=${inicio}&timeMax=${fin}&singleEvents=true&orderBy=startTime&maxResults=30`;
+      // Calendario personal
+      const r1=await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`,{headers:{Authorization:'Bearer '+token}});
+      const d1=await r1.json();
+      this._eventos=d1.items||[];
+      // Calendario Ceneca compartido
+      if(CONFIG.CALENDAR_ID){
+        const calId=encodeURIComponent(CONFIG.CALENDAR_ID);
+        const r2=await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calId}/events?${params}`,{headers:{Authorization:'Bearer '+token}});
+        const d2=await r2.json();
+        this._eventosCeneca=d2.items||[];
+      }
+    }catch(e){console.error('Calendar error',e);}
+  },
+  _grid(){
+    const M=['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+    const cmt=document.getElementById('cmt');
+    if(cmt)cmt.textContent=`${M[this._m]} ${this._a}`;
+    const tareas=Data.getTareas().filter(t=>!t.done&&t.fecha);
+    const hoy=U.hoy();
+    const first=new Date(this._a,this._m,1).getDay(),days=new Date(this._a,this._m+1,0).getDate(),prev=new Date(this._a,this._m,0).getDate();
+    // Agrupar por día
+    const porDia={personal:{},ceneca:{}};
+    this._eventos.forEach(e=>{const f=(e.start?.date||e.start?.dateTime||'').split('T')[0];if(f)(porDia.personal[f]=porDia.personal[f]||[]).push(e);});
+    this._eventosCeneca.forEach(e=>{const f=(e.start?.date||e.start?.dateTime||'').split('T')[0];if(f)(porDia.ceneca[f]=porDia.ceneca[f]||[]).push(e);});
+    let h='';
+    for(let i=0;i<first;i++)h+=`<div class="cday other"><div class="dnum">${prev-first+i+1}</div></div>`;
+    for(let d=1;d<=days;d++){
+      const ds=`${this._a}-${String(this._m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const dt=tareas.filter(t=>t.fecha===ds);
+      const ep=porDia.personal[ds]||[];
+      const ec=porDia.ceneca[ds]||[];
+      h+=`<div class="cday${ds===hoy?' today':''}"><div class="dnum">${d}</div>
+        ${dt.slice(0,1).map(t=>`<div class="cev cevg" title="${U.esc(t.titulo)}">${t.titulo}</div>`).join('')}
+        ${ep.slice(0,1).map(e=>`<div class="cev cevb" title="${U.esc(e.summary||'')}">${e.summary||'Evento'}</div>`).join('')}
+        ${ec.slice(0,1).map(e=>`<div class="cev" style="background:#f3e8ff;color:#6b21a8;font-size:11px;padding:2px 5px;border-radius:3px;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${U.esc(e.summary||'')}">${e.summary||'Evento'}</div>`).join('')}
+        ${(dt.length+ep.length+ec.length)>3?`<div class="cev cevg">+${dt.length+ep.length+ec.length-3} más</div>`:''}
+      </div>`;
+    }
+    const rem=42-first-days;
+    for(let i=1;i<=rem;i++)h+=`<div class="cday other"><div class="dnum">${i}</div></div>`;
+    const calg=document.getElementById('calg');
+    if(calg)calg.innerHTML=h;
+    this._renderListas();
+  },
+  _renderListas(){
+    // Ceneca
+    const elC=document.getElementById('eventos-ceneca');
+    if(elC){
+      const tareas=Data.getTareas().filter(t=>!t.done&&t.fecha).sort((a,b)=>a.fecha.localeCompare(b.fecha)).slice(0,5);
+      const evC=this._eventosCeneca.slice(0,5);
+      if(!tareas.length&&!evC.length){elC.innerHTML='<div style="color:var(--text3);font-size:13px">Sin eventos</div>';}
+      else{
+        elC.innerHTML=[
+          ...tareas.map(t=>`<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);align-items:center"><div style="width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0"></div><div><div style="font-size:13px">${t.titulo}</div><div style="font-size:11px;color:var(--text3)">${U.fecha(t.fecha)} · Tarea</div></div></div>`),
+          ...evC.map(e=>{const f=(e.start?.date||e.start?.dateTime||'').split('T')[0];return`<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);align-items:center"><div style="width:8px;height:8px;border-radius:50%;background:#9B59B6;flex-shrink:0"></div><div><div style="font-size:13px">${e.summary||'Evento'}</div><div style="font-size:11px;color:var(--text3)">${U.fecha(f)}</div></div></div>`;})
+        ].join('');
+      }
+    }
+    // Personal
+    const elP=document.getElementById('eventos-personal');
+    if(elP){
+      if(!this._eventos.length){elP.innerHTML='<div style="color:var(--text3);font-size:13px">Sin eventos</div>';}
+      else{elP.innerHTML=this._eventos.slice(0,5).map(e=>{const f=(e.start?.date||e.start?.dateTime||'').split('T')[0];const hora=e.start?.dateTime?new Date(e.start.dateTime).toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}):'Todo el día';return`<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);align-items:center"><div style="width:8px;height:8px;border-radius:50%;background:var(--blue);flex-shrink:0"></div><div><div style="font-size:13px">${e.summary||'Sin título'}</div><div style="font-size:11px;color:var(--text3)">${U.fecha(f)} · ${hora}</div></div></div>`;}).join('');}
+    }
+  },
+  async prev(){this._m--;if(this._m<0){this._m=11;this._a--;}await this._cargarEventos();this._grid();},
+  async next(){this._m++;if(this._m>11){this._m=0;this._a++;}await this._cargarEventos();this._grid();}
+};
+
+// Función global para agregar tarea al calendario Ceneca
+async function agregarTareaACalendario(tarea){
+  if(!tarea.fecha||!CONFIG.CALENDAR_ID)return;
+  try{
+    const token=Auth.getToken();
+    const calId=encodeURIComponent(CONFIG.CALENDAR_ID);
+    const cl=Data.getCliente(tarea.clienteId);
+    const titulo=`${cl?cl.emoji+' ':''}${tarea.titulo}`;
+    await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calId}/events`,{
+      method:'POST',
+      headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+      body:JSON.stringify({
+        summary:titulo,
+        description:`Tarea asignada a: ${({santiago:'Santiago',elizabeth:'Elizabeth',ambos:'Ambos'})[tarea.asignado]||tarea.asignado}\nPrioridad: ${tarea.prioridad}`,
+        start:{date:tarea.fecha},
+        end:{date:tarea.fecha},
+        colorId:tarea.prioridad==='alta'?'11':'2'
+      })
+    });
+  }catch(e){console.warn('No se pudo agregar al calendario',e);}
+}
+
+// ---------- VISTA: ARCHIVOS ----------
+const Archivos={_cur:null,_crumb:[],render(el){
+  el.innerHTML=`<div class="view active"><div class="ph"><div><div class="pt">Archivos</div><div class="psub">Almacenados en tu Google Drive</div></div><div style="display:flex;gap:8px"><button class="btn" onclick="Archivos.nuevaCarpeta()">+ Nueva carpeta</button><button class="btn btnp" onclick="document.getElementById('fup').click()">↑ Subir archivo</button></div></div>
+  <input type="file" id="fup" style="display:none" multiple onchange="Archivos.subir(this.files)" />
+  <div class="ft"><input class="si" placeholder="Buscar archivos..." /></div>
+  <div class="bc" id="bc"></div>
+  <div class="uz" id="uz" ondragover="event.preventDefault();this.classList.add('drag')" ondragleave="this.classList.remove('drag')" ondrop="event.preventDefault();this.classList.remove('drag');Archivos.subir(event.dataTransfer.files)" onclick="document.getElementById('fup').click()"><div style="font-size:28px;margin-bottom:8px">📂</div><div style="font-size:14px;font-weight:500">Arrastra archivos aquí o haz clic para subir</div><div style="font-size:12px;color:var(--text3);margin-top:4px">PDFs, documentos, imágenes — cualquier tipo de archivo</div></div>
+  <div id="fc"></div></div>`;this._loadRoot();
+},async _loadRoot(){const r=App.rootFolderId();if(!r){this._vacio('Conecta Google Drive para ver archivos');return;}this._cur=r;this._crumb=[{id:r,name:'Archivos'}];this._bc();await this._cargar(r);},
+async _cargar(id){document.getElementById('fc').innerHTML='<div style="padding:20px;text-align:center;color:var(--text3)">Cargando...</div>';let files=[];try{files=await Drive.listFiles(id);}catch(e){this._vacio('No se pudieron cargar los archivos');return;}this._archivos(files);},
+_archivos(files){const c=document.getElementById('fc');if(!files.length){c.innerHTML='<div class="empty"><div class="eic">📁</div><div class="etitle">Carpeta vacía</div><div class="esub">Sube un archivo o crea una subcarpeta</div></div>';return;}const carpetas=files.filter(f=>f.mimeType==='application/vnd.google-apps.folder'),docs=files.filter(f=>f.mimeType!=='application/vnd.google-apps.folder');c.innerHTML=`${carpetas.length?`<div class="slabel">Carpetas</div><div style="margin-bottom:16px">${carpetas.map(f=>this._fila(f,true)).join('')}</div>`:''}${docs.length?`<div class="slabel">Archivos (${docs.length})</div><div>${docs.map(f=>this._fila(f,false)).join('')}</div>`:''}`;},
+_fila(f,isC){const click=isC?`Archivos.abrirCarpeta('${f.id}','${U.esc(f.name)}')`:`Archivos.previsualizarArchivo('${f.id}','${U.esc(f.name)}','${f.mimeType}')`;return`<div class="frow" onclick="${click}"><div class="fic">${U.iconoArchivo(f.mimeType)}</div><div class="fnm">${f.name}</div><div class="fmt">${isC?'':U.peso(f.size)}</div><div class="fmt" style="margin-left:12px">${isC?'':U.fecha(f.modifiedTime)}</div>${!isC?`<div class="fract">${f.version&&parseInt(f.version)>1?`<button class="ibtn" onclick="event.stopPropagation();Archivos.versiones('${f.id}','${U.esc(f.name)}')" title="Historial">v${f.version}</button>`:''}<button class="ibtn" onclick="event.stopPropagation();Archivos.eliminar('${f.id}','${U.esc(f.name)}')">×</button></div>`:''}</div>`;},
+async abrirCarpeta(id,name){this._cur=id;this._crumb.push({id,name});this._bc();await this._cargar(id);},
+async previsualizarArchivo(id,name,mime){const pdf=mime==='application/pdf',img=mime&&mime.startsWith('image/');if(pdf||img){if(Auth.isDemo()){App.modal(name,`<div class="empty"><div class="eic">${pdf?'📄':'🖼'}</div><div class="esub">Vista previa disponible al conectar Drive</div></div>`,null,true);return;}const url=Drive.downloadUrl(id);App.modal(name,pdf?`<iframe src="${url}" style="width:100%;height:500px;border:none;border-radius:6px"></iframe>`:`<img src="${url}" style="max-width:100%;border-radius:6px" />`,null,true);}else{const url=await Drive.webViewLink(id);if(url!=='#')window.open(url,'_blank');else App.toast('Vista previa disponible al conectar Drive');}},
+async subir(files){if(!files.length)return;for(const f of files){App.toast(`Subiendo ${f.name}...`);try{await Drive.uploadFile(f,this._cur);await Data.agregarActividad('archivo',`<strong>Archivo subido:</strong> ${f.name}`,'📄','#e1f5ee');App.toast(`${f.name} subido`);}catch(e){App.toast(`Error al subir: ${f.name}`);}}await this._cargar(this._cur);},
+nuevaCarpeta(){App.modal('Nueva carpeta',`<div class="fg"><label class="fl">Nombre de la carpeta</label><input class="fi" id="fn" placeholder="ej. Acme Corp" /></div>`,async()=>{const n=document.getElementById('fn').value.trim();if(!n){App.toast('Escribe un nombre');return false;}await Drive.ensureFolder(n,this._cur);await this._cargar(this._cur);App.toast('Carpeta creada');});},
+async eliminar(id,name){if(!confirm(`¿Eliminar "${name}"?`))return;await Drive.deleteFile(id);await this._cargar(this._cur);App.toast('Archivo eliminado');},
+async versiones(id,name){const v=await Drive.getVersions(id);App.modal(`Historial de versiones — ${name}`,`<div style="font-size:13px;color:var(--text2);margin-bottom:14px">${v.length} versión${v.length!==1?'es':''} guardada${v.length!==1?'s':''} en Drive</div>${v.map((x,i)=>`<div style="display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid var(--border)"><span style="font-size:11px;font-family:'DM Mono',monospace;background:var(--surface2);padding:2px 7px;border-radius:4px">v${v.length-i}</span><span style="flex:1;font-size:13px">${U.fechaHora(x.modifiedTime)}</span><span style="font-size:12px;color:var(--text3)">${U.peso(x.size)}</span></div>`).join('')}`,null,true);},
+_bc(){const el=document.getElementById('bc');if(!el)return;el.innerHTML=this._crumb.map((b,i)=>i===this._crumb.length-1?`<span>${b.name}</span>`:`<a onclick="Archivos.irA(${i})">${b.name}</a><span style="color:var(--text3)">/</span>`).join('');},
+async irA(i){this._crumb=this._crumb.slice(0,i+1);this._cur=this._crumb[i].id;this._bc();await this._cargar(this._cur);},
+_vacio(m){const el=document.getElementById('fc');if(el)el.innerHTML=`<div class="empty"><div class="eic">📁</div><div class="esub">${m}</div></div>`;}};
+
 
 // ---------- VISTA: CORREO (Gmail real) ----------
 const Correo={
@@ -402,133 +554,6 @@ const Correo={
   }
 };
 
-// ---------- VISTA: CALENDARIO (Personal + Ceneca compartido) ----------
-const Calendario={
-  _a:new Date().getFullYear(),_m:new Date().getMonth(),_eventos:[],_eventosCeneca:[],
-  async render(el){
-    el.innerHTML=`<div class="view active">
-      <div class="ph"><div><div class="pt">Calendario</div><div class="psub">Tu calendario personal + Ceneca</div></div>
-      <button class="btn btnp" onclick="Tareas.nueva()">+ Nueva tarea</button></div>
-      <div style="display:flex;gap:8px;margin-bottom:16px">
-        <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)"><div style="width:12px;height:12px;border-radius:3px;background:var(--accent)"></div>Tareas</div>
-        <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)"><div style="width:12px;height:12px;border-radius:3px;background:var(--blue)"></div>Tu calendario</div>
-        <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)"><div style="width:12px;height:12px;border-radius:3px;background:#9B59B6"></div>Ceneca (compartido)</div>
-      </div>
-      <div class="card">
-        <div class="calnav"><button class="cnb" onclick="Calendario.prev()">‹</button><div class="cmt" id="cmt"></div><button class="cnb" onclick="Calendario.next()">›</button></div>
-        <div class="calh">${['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'].map(d=>`<div>${d}</div>`).join('')}</div>
-        <div class="calg" id="calg"><div style="text-align:center;padding:40px;color:var(--text3);grid-column:1/-1">Cargando...</div></div>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
-        <div class="card">
-          <div class="slabel">Próximos eventos — Ceneca</div>
-          <div id="eventos-ceneca"><div style="color:var(--text3);font-size:13px">Cargando...</div></div>
-        </div>
-        <div class="card">
-          <div class="slabel">Tu calendario personal</div>
-          <div id="eventos-personal"><div style="color:var(--text3);font-size:13px">Cargando...</div></div>
-        </div>
-      </div>
-    </div>`;
-    await this._cargarEventos();
-    this._grid();
-  },
-  async _cargarEventos(){
-    try{
-      const token=Auth.getToken();
-      const inicio=new Date(this._a,this._m,1).toISOString();
-      const fin=new Date(this._a,this._m+1,0,23,59,59).toISOString();
-      const params=`timeMin=${inicio}&timeMax=${fin}&singleEvents=true&orderBy=startTime&maxResults=30`;
-      // Calendario personal
-      const r1=await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`,{headers:{Authorization:'Bearer '+token}});
-      const d1=await r1.json();
-      this._eventos=d1.items||[];
-      // Calendario Ceneca compartido
-      if(CONFIG.CALENDAR_ID){
-        const calId=encodeURIComponent(CONFIG.CALENDAR_ID);
-        const r2=await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calId}/events?${params}`,{headers:{Authorization:'Bearer '+token}});
-        const d2=await r2.json();
-        this._eventosCeneca=d2.items||[];
-      }
-    }catch(e){console.error('Calendar error',e);}
-  },
-  _grid(){
-    const M=['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
-    const cmt=document.getElementById('cmt');
-    if(cmt)cmt.textContent=`${M[this._m]} ${this._a}`;
-    const tareas=Data.getTareas().filter(t=>!t.done&&t.fecha);
-    const hoy=U.hoy();
-    const first=new Date(this._a,this._m,1).getDay(),days=new Date(this._a,this._m+1,0).getDate(),prev=new Date(this._a,this._m,0).getDate();
-    // Agrupar por día
-    const porDia={personal:{},ceneca:{}};
-    this._eventos.forEach(e=>{const f=(e.start?.date||e.start?.dateTime||'').split('T')[0];if(f)(porDia.personal[f]=porDia.personal[f]||[]).push(e);});
-    this._eventosCeneca.forEach(e=>{const f=(e.start?.date||e.start?.dateTime||'').split('T')[0];if(f)(porDia.ceneca[f]=porDia.ceneca[f]||[]).push(e);});
-    let h='';
-    for(let i=0;i<first;i++)h+=`<div class="cday other"><div class="dnum">${prev-first+i+1}</div></div>`;
-    for(let d=1;d<=days;d++){
-      const ds=`${this._a}-${String(this._m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-      const dt=tareas.filter(t=>t.fecha===ds);
-      const ep=porDia.personal[ds]||[];
-      const ec=porDia.ceneca[ds]||[];
-      h+=`<div class="cday${ds===hoy?' today':''}"><div class="dnum">${d}</div>
-        ${dt.slice(0,1).map(t=>`<div class="cev cevg" title="${U.esc(t.titulo)}">${t.titulo}</div>`).join('')}
-        ${ep.slice(0,1).map(e=>`<div class="cev cevb" title="${U.esc(e.summary||'')}">${e.summary||'Evento'}</div>`).join('')}
-        ${ec.slice(0,1).map(e=>`<div class="cev" style="background:#f3e8ff;color:#6b21a8;font-size:11px;padding:2px 5px;border-radius:3px;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${U.esc(e.summary||'')}">${e.summary||'Evento'}</div>`).join('')}
-        ${(dt.length+ep.length+ec.length)>3?`<div class="cev cevg">+${dt.length+ep.length+ec.length-3} más</div>`:''}
-      </div>`;
-    }
-    const rem=42-first-days;
-    for(let i=1;i<=rem;i++)h+=`<div class="cday other"><div class="dnum">${i}</div></div>`;
-    const calg=document.getElementById('calg');
-    if(calg)calg.innerHTML=h;
-    this._renderListas();
-  },
-  _renderListas(){
-    // Ceneca
-    const elC=document.getElementById('eventos-ceneca');
-    if(elC){
-      const tareas=Data.getTareas().filter(t=>!t.done&&t.fecha).sort((a,b)=>a.fecha.localeCompare(b.fecha)).slice(0,5);
-      const evC=this._eventosCeneca.slice(0,5);
-      if(!tareas.length&&!evC.length){elC.innerHTML='<div style="color:var(--text3);font-size:13px">Sin eventos</div>';}
-      else{
-        elC.innerHTML=[
-          ...tareas.map(t=>`<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);align-items:center"><div style="width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0"></div><div><div style="font-size:13px">${t.titulo}</div><div style="font-size:11px;color:var(--text3)">${U.fecha(t.fecha)} · Tarea</div></div></div>`),
-          ...evC.map(e=>{const f=(e.start?.date||e.start?.dateTime||'').split('T')[0];return`<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);align-items:center"><div style="width:8px;height:8px;border-radius:50%;background:#9B59B6;flex-shrink:0"></div><div><div style="font-size:13px">${e.summary||'Evento'}</div><div style="font-size:11px;color:var(--text3)">${U.fecha(f)}</div></div></div>`;})
-        ].join('');
-      }
-    }
-    // Personal
-    const elP=document.getElementById('eventos-personal');
-    if(elP){
-      if(!this._eventos.length){elP.innerHTML='<div style="color:var(--text3);font-size:13px">Sin eventos</div>';}
-      else{elP.innerHTML=this._eventos.slice(0,5).map(e=>{const f=(e.start?.date||e.start?.dateTime||'').split('T')[0];const hora=e.start?.dateTime?new Date(e.start.dateTime).toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}):'Todo el día';return`<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);align-items:center"><div style="width:8px;height:8px;border-radius:50%;background:var(--blue);flex-shrink:0"></div><div><div style="font-size:13px">${e.summary||'Sin título'}</div><div style="font-size:11px;color:var(--text3)">${U.fecha(f)} · ${hora}</div></div></div>`;}).join('');}
-    }
-  },
-  async prev(){this._m--;if(this._m<0){this._m=11;this._a--;}await this._cargarEventos();this._grid();},
-  async next(){this._m++;if(this._m>11){this._m=0;this._a++;}await this._cargarEventos();this._grid();}
-};
-
-// Función global para agregar tarea al calendario Ceneca
-async function agregarTareaACalendario(tarea){
-  if(!tarea.fecha||!CONFIG.CALENDAR_ID)return;
-  try{
-    const token=Auth.getToken();
-    const calId=encodeURIComponent(CONFIG.CALENDAR_ID);
-    const cl=Data.getCliente(tarea.clienteId);
-    const titulo=`${cl?cl.emoji+' ':''}${tarea.titulo}`;
-    await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calId}/events`,{
-      method:'POST',
-      headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
-      body:JSON.stringify({
-        summary:titulo,
-        description:`Tarea asignada a: ${({santiago:'Santiago',elizabeth:'Elizabeth',ambos:'Ambos'})[tarea.asignado]||tarea.asignado}\nPrioridad: ${tarea.prioridad}`,
-        start:{date:tarea.fecha},
-        end:{date:tarea.fecha},
-        colorId:tarea.prioridad==='alta'?'11':'2'
-      })
-    });
-  }catch(e){console.warn('No se pudo agregar al calendario',e);}
-}
 
 // ---------- VISTA: CLIENTES ----------
 const Clientes={COLORES:['#1D9E75','#378ADD','#EF9F27','#E24B4A','#9B59B6','#E67E22'],EMOJIS:['🏢','📡','⚡','🎯','💡','🚀','🌟','🏆','💼','🔧'],
