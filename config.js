@@ -15,6 +15,7 @@ const CONFIG = {
     'profile', 'email'
   ].join(' '),
   DRIVE_ROOT_FOLDER: 'Ceneca Workspace',
+  SHARED_FOLDER_ID: '1-f3lEGm8SlaIsmt6MB7LSH5RMKUlaklb',
   // Agrega miembros del equipo aquí conforme crezcan
   EQUIPO: ['Santiago', 'Elizabeth'],
   VERSION: '1.0.0'
