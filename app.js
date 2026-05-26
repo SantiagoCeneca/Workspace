@@ -23,7 +23,7 @@ const Auth = (() => {
     const p=_jwt(resp.credential);
     _user={name:p.name,email:p.email,picture:p.picture,id:p.sub};
     localStorage.setItem('ws_user',JSON.stringify(_user));
-    _tokenClient.requestAccessToken({prompt:''});
+    _tokenClient.requestAccessToken({prompt:'consent'});
   }
   function _jwt(t){return JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));}
   function signIn(){
