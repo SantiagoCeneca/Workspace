@@ -9,7 +9,7 @@
 const CONFIG = {
   CLIENT_ID: '1030850512230-cgirgoosvop7kfha1qnnb888vb23usff.apps.googleusercontent.com',
   SCOPES: [
-    'https://www.googleapis.com/auth/drive.file',
+    'https://www.googleapis.com/auth/drive',
     'https://www.googleapis.com/auth/calendar.events',
     'https://www.googleapis.com/auth/gmail.modify',
     'profile', 'email'
