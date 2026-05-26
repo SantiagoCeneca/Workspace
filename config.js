@@ -7,7 +7,7 @@
 //  5. Pega tu Client ID abajo
 // ============================================================
 const CONFIG = {
-  CLIENT_ID: 'YOUR_GOOGLE_CLIENT_ID_HERE',
+  CLIENT_ID: '1030850512230-cgirgoosvop7kfha1qnnb888vb23usff.apps.googleusercontent.com',
   SCOPES: [
     'https://www.googleapis.com/auth/drive.file',
     'https://www.googleapis.com/auth/calendar.events',
