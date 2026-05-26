@@ -336,7 +336,7 @@ const App=(()=>{
     document.getElementById('auth').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
     document.getElementById('userpill').textContent=u.email||'';
-    try{_root=await Drive.ensureFolder(CONFIG.DRIVE_ROOT_FOLDER);await Data.init(_root);}
+    try{_root=CONFIG.SHARED_FOLDER_ID;await Data.init(_root);}
     catch(e){console.warn('Drive init failed',e);await Data.init(null);}
     Vistas.ir('inicio');
   }
