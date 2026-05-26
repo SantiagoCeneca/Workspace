@@ -16,6 +16,7 @@ const CONFIG = {
   ].join(' '),
   DRIVE_ROOT_FOLDER: 'Ceneca Workspace',
   SHARED_FOLDER_ID: '1-f3lEGm8SlaIsmt6MB7LSH5RMKUlaklb',
+  CALENDAR_ID: 'c_7468f40cce6eff18e37720dced67b0d276a91c472884c9e9c582ae29ff9f53a6@group.calendar.google.com',
   // Agrega miembros del equipo aquí conforme crezcan
   EQUIPO: ['Santiago', 'Elizabeth'],
   VERSION: '1.0.0'
