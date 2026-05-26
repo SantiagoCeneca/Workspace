@@ -34,7 +34,7 @@ const Auth = (() => {
       localStorage.setItem('ws_user',JSON.stringify(_user));localStorage.setItem('ws_token','demo');
       App.onSignedIn(_user,_token);return;
     }
-    google.accounts.id.prompt();
+    _tokenClient.requestAccessToken({prompt:'consent'});
   }
   function signOut(){localStorage.clear();location.reload();}
   function getUser(){return _user||JSON.parse(localStorage.getItem('ws_user')||'null');}
