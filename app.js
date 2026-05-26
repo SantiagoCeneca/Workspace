@@ -1,0 +1,589 @@
+// ---------- AUTH — OAuth popup directo ----------
+const Auth = (() => {
+  let _user=null,_token=null;
+
+  function init(){return Promise.resolve();}
+
+  function signIn(){
+    // Si ya hay sesión guardada y token válido, entrar directo
+    const su=localStorage.getItem('ws_user'),st=localStorage.getItem('ws_token');
+    if(su&&st&&st!=='demo'){
+      _user=JSON.parse(su);_token=st;
+      App.onSignedIn(_user,_token);return;
+    }
+    // Demo mode
+    if(CONFIG.CLIENT_ID==='YOUR_GOOGLE_CLIENT_ID_HERE'){
+      _user={name:'Santiago',email:'santiago@ceneca.com.mx',picture:null,id:'demo'};_token='demo';
+      localStorage.setItem('ws_user',JSON.stringify(_user));localStorage.setItem('ws_token','demo');
+      App.onSignedIn(_user,_token);return;
+    }
+    // OAuth popup directo — pide cuenta + permisos en una sola ventana
+    const scopes=encodeURIComponent(CONFIG.SCOPES);
+    const clientId=encodeURIComponent(CONFIG.CLIENT_ID);
+    const redirect=encodeURIComponent(window.location.origin+window.location.pathname);
+    const url=`https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${redirect}&response_type=token&scope=${scopes}&prompt=select_account`;
+    const popup=window.open(url,'googlelogin','width=500,height=600,left=400,top=100');
+    // Escuchar cuando el popup regresa con el token
+    const timer=setInterval(()=>{
+      try{
+        if(popup.closed){clearInterval(timer);return;}
+        const hash=popup.location.hash;
+        if(hash&&hash.includes('access_token')){
+          clearInterval(timer);
+          const params=new URLSearchParams(hash.substring(1));
+          _token=params.get('access_token');
+          localStorage.setItem('ws_token',_token);
+          popup.close();
+          // Obtener datos del usuario con el token
+          fetch('https://www.googleapis.com/oauth2/v3/userinfo',{
+            headers:{Authorization:'Bearer '+_token}
+          }).then(r=>r.json()).then(info=>{
+            _user={name:info.name,email:info.email,picture:info.picture,id:info.sub};
+            localStorage.setItem('ws_user',JSON.stringify(_user));
+            App.onSignedIn(_user,_token);
+          });
+        }
+      }catch(e){/* cross-origin, esperar */}
+    },500);
+  }
+
+  function signOut(){localStorage.clear();location.reload();}
+  function getUser(){return _user||JSON.parse(localStorage.getItem('ws_user')||'null');}
+  function getToken(){return _token||localStorage.getItem('ws_token');}
+  function isDemo(){return getToken()==='demo';}
+  return{init,signIn,signOut,getUser,getToken,isDemo};
+})();
+
+// ---------- DRIVE ----------
+const Drive = (() => {
+  const B='https://www.googleapis.com/drive/v3',U='https://www.googleapis.com/upload/drive/v3';
+  function _h(){return{Authorization:`Bearer ${Auth.getToken()}`,'Content-Type':'application/json'};}
+  async function _r(url,o={}){if(Auth.isDemo())return null;const res=await fetch(url,{headers:_h(),...o});if(!res.ok)throw new Error('Drive '+res.status);return res.json();}
+  async function ensureFolder(name,parent='root'){
+    if(Auth.isDemo())return 'demo-'+name;
+    const q=`name='${name}' and mimeType='application/vnd.google-apps.folder' and '${parent}' in parents and trashed=false`;
+    const r=await _r(`${B}/files?q=${encodeURIComponent(q)}&fields=files(id,name)`);
+    if(r.files.length)return r.files[0].id;
+    const c=await _r(`${B}/files`,{method:'POST',body:JSON.stringify({name,mimeType:'application/vnd.google-apps.folder',parents:[parent]})});
+    return c.id;
+  }
+  async function listFiles(folderId){
+    if(Auth.isDemo())return _demo(folderId);
+    const q=`'${folderId}' in parents and trashed=false`;
+    const r=await _r(`${B}/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,size,modifiedTime,version)&orderBy=folder,name`);
+    return r.files;
+  }
+  async function uploadFile(file,folderId){
+    if(Auth.isDemo())return{id:'demo-'+Date.now(),name:file.name,mimeType:file.type,size:file.size,modifiedTime:new Date().toISOString(),version:'1'};
+    const meta={name:file.name,parents:[folderId]};const form=new FormData();
+    form.append('metadata',new Blob([JSON.stringify(meta)],{type:'application/json'}));form.append('file',file);
+    const res=await fetch(`${U}/files?uploadType=multipart&fields=id,name,mimeType,size,modifiedTime,version`,{method:'POST',headers:{Authorization:`Bearer ${Auth.getToken()}`},body:form});
+    return res.json();
+  }
+  function downloadUrl(id){return `${B}/files/${id}?alt=media`;}
+  async function webViewLink(id){if(Auth.isDemo())return '#';const r=await _r(`${B}/files/${id}?fields=webViewLink`);return r.webViewLink;}
+  async function getVersions(id){if(Auth.isDemo())return[{id:'1',modifiedTime:new Date().toISOString(),size:'10240'}];const r=await _r(`${B}/files/${id}/revisions?fields=revisions(id,modifiedTime,size)`);return r.revisions||[];}
+  async function deleteFile(id){if(Auth.isDemo())return;await fetch(`${B}/files/${id}`,{method:'DELETE',headers:_h()});}
+  async function saveData(fn,data,root){
+    if(Auth.isDemo()){localStorage.setItem('ws_d_'+fn,JSON.stringify(data));return;}
+    const q=`name='${fn}' and '${root}' in parents and trashed=false`;
+    const ex=await _r(`${B}/files?q=${encodeURIComponent(q)}&fields=files(id)`);
+    if(ex.files.length){await fetch(`${U}/files/${ex.files[0].id}?uploadType=media`,{method:'PATCH',headers:_h(),body:JSON.stringify(data)});}
+    else{const form=new FormData();form.append('metadata',new Blob([JSON.stringify({name:fn,parents:[root]})],{type:'application/json'}));form.append('file',new Blob([JSON.stringify(data)],{type:'application/json'}));await fetch(`${U}/files?uploadType=multipart`,{method:'POST',headers:{Authorization:`Bearer ${Auth.getToken()}`},body:form});}
+  }
+  async function loadData(fn,root){
+    if(Auth.isDemo()){const r=localStorage.getItem('ws_d_'+fn);return r?JSON.parse(r):null;}
+    const q=`name='${fn}' and '${root}' in parents and trashed=false`;
+    const r=await _r(`${B}/files?q=${encodeURIComponent(q)}&fields=files(id)`);
+    if(!r.files.length)return null;
+    const c=await fetch(`${B}/files/${r.files[0].id}?alt=media`,{headers:{Authorization:`Bearer ${Auth.getToken()}`}});
+    return c.json();
+  }
+  function _demo(f){
+    if(String(f).toLowerCase().includes('acme')||String(f).includes('demo-Acme'))
+      return[{id:'f1',name:'Contrato_2024.pdf',mimeType:'application/pdf',size:'204800',modifiedTime:new Date(Date.now()-86400000).toISOString(),version:'3'},
+             {id:'f2',name:'Propuesta_Q1.docx',mimeType:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',size:'51200',modifiedTime:new Date(Date.now()-172800000).toISOString(),version:'1'}];
+    return[];
+  }
+  return{ensureFolder,listFiles,uploadFile,downloadUrl,webViewLink,getVersions,deleteFile,saveData,loadData};
+})();
+
+// ---------- DATOS ----------
+const Data = (() => {
+  let _root=null;
+  let _db={tareas:[],clientes:[],notas:[],actividad:[]};
+  function _d(n){const d=new Date();d.setDate(d.getDate()+n);return d.toISOString().split('T')[0];}
+  function _ago(m){return new Date(Date.now()-m*60000).toISOString();}
+  const DEF={
+    tareas:[
+      {id:1,titulo:'Revisar propuesta del cliente',clienteId:1,fecha:_d(2),asignado:'ambos',done:false,prioridad:'alta',creadoEn:_ago(0)},
+      {id:2,titulo:'Enviar factura a Acme Corp',clienteId:1,fecha:_d(1),asignado:'santiago',done:false,prioridad:'normal',creadoEn:_ago(0)},
+      {id:3,titulo:'Preparar informe mensual',clienteId:2,fecha:_d(5),asignado:'elizabeth',done:false,prioridad:'normal',creadoEn:_ago(0)},
+      {id:4,titulo:'Seguimiento renovación de contrato',clienteId:3,fecha:_d(-1),asignado:'ambos',done:false,prioridad:'alta',creadoEn:_ago(0)},
+      {id:5,titulo:'Actualizar cronograma del proyecto',clienteId:2,fecha:_d(7),asignado:'santiago',done:true,prioridad:'baja',creadoEn:_ago(0)},
+    ],
+    clientes:[
+      {id:1,nombre:'Acme Corp',sector:'Tecnología',estatus:'activo',contacto:'juan@acme.com',notas:'Cliente desde 2022. Prefiere comunicación por email.',color:'#1D9E75',emoji:'🏢',creadoEn:_ago(0)},
+      {id:2,nombre:'Blue Sky Media',sector:'Marketing',estatus:'activo',contacto:'sara@bluesky.com',notas:'Cliente nuevo. Retención mensual.',color:'#378ADD',emoji:'📡',creadoEn:_ago(0)},
+      {id:3,nombre:'Nexus Solutions',sector:'Consultoría',estatus:'inactivo',contacto:'miguel@nexus.com',notas:'Contrato por renovar en enero.',color:'#EF9F27',emoji:'⚡',creadoEn:_ago(0)},
+    ],
+    notas:[
+      {id:1,titulo:'Notas de inicio de proyecto',cuerpo:'Se discutió el cronograma con el cliente. Hitos clave: Fase 1 a fin de mes, Fase 2 en 6 semanas. Presupuesto aprobado.',clienteId:1,creadoEn:_ago(60),actualizadoEn:_ago(30)},
+      {id:2,titulo:'Segunda mente — registro de decisiones',cuerpo:'Usar esta nota para registrar decisiones importantes.\n\n— Google Drive para almacenamiento de archivos\n— Reuniones semanales los lunes con Elizabeth',clienteId:null,creadoEn:_ago(1440),actualizadoEn:_ago(1440)},
+    ],
+    actividad:[
+      {id:1,tipo:'archivo',texto:'<strong>Elizabeth</strong> subió <strong>Contrato_2024.pdf</strong> a Acme Corp',tiempo:_ago(30),icono:'📄',color:'#e1f5ee'},
+      {id:2,tipo:'tarea',texto:'<strong>Santiago</strong> completó <strong>Actualizar cronograma del proyecto</strong>',tiempo:_ago(120),icono:'✓',color:'#e1f5ee'},
+      {id:3,tipo:'nota',texto:'<strong>Santiago</strong> creó la nota <strong>Notas de inicio de proyecto</strong>',tiempo:_ago(360),icono:'📝',color:'#e6f1fb'},
+      {id:4,tipo:'cliente',texto:'<strong>Elizabeth</strong> agregó el cliente <strong>Blue Sky Media</strong>',tiempo:_ago(1440),icono:'👤',color:'#faeeda'},
+    ]
+  };
+  async function init(root){
+    _root=root;
+    for(const k of Object.keys(_db)){
+      const l=await Drive.loadData(`ws_${k}.json`,root).catch(()=>null);
+      _db[k]=l||DEF[k];
+    }
+  }
+  async function _save(k){if(_root)await Drive.saveData(`ws_${k}.json`,_db[k],_root).catch(()=>{});}
+  function _nid(a){return a.length?Math.max(...a.map(x=>x.id))+1:1;}
+  // tareas
+  function getTareas(){return[..._db.tareas];}
+  async function agregarTarea(t){const n={...t,id:_nid(_db.tareas),creadoEn:new Date().toISOString(),done:false};_db.tareas.unshift(n);await _save('tareas');agregarActividad('tarea',`<strong>Tarea agregada:</strong> ${n.titulo}`,'📋','#e6f1fb');return n;}
+  async function actualizarTarea(id,c){const i=_db.tareas.findIndex(t=>t.id===id);if(i<0)return;_db.tareas[i]={..._db.tareas[i],...c};await _save('tareas');if(c.done!==undefined)agregarActividad('tarea',`Tarea <strong>${c.done?'completada':'reabierta'}:</strong> ${_db.tareas[i].titulo}`,c.done?'✓':'↩',c.done?'#e1f5ee':'#faeeda');return _db.tareas[i];}
+  async function eliminarTarea(id){const t=_db.tareas.find(t=>t.id===id);_db.tareas=_db.tareas.filter(t=>t.id!==id);await _save('tareas');if(t)agregarActividad('tarea',`Tarea <strong>eliminada:</strong> ${t.titulo}`,'🗑','#fcebeb');}
+  // clientes
+  function getClientes(){return[..._db.clientes];}
+  function getCliente(id){return _db.clientes.find(c=>c.id===id);}
+  async function agregarCliente(c){const n={...c,id:_nid(_db.clientes),creadoEn:new Date().toISOString()};_db.clientes.push(n);await _save('clientes');agregarActividad('cliente',`<strong>Cliente agregado:</strong> ${n.nombre}`,'👤','#faeeda');return n;}
+  async function actualizarCliente(id,c){const i=_db.clientes.findIndex(x=>x.id===id);if(i<0)return;_db.clientes[i]={..._db.clientes[i],...c};await _save('clientes');return _db.clientes[i];}
+  async function eliminarCliente(id){const c=_db.clientes.find(c=>c.id===id);_db.clientes=_db.clientes.filter(c=>c.id!==id);await _save('clientes');if(c)agregarActividad('cliente',`Cliente <strong>eliminado:</strong> ${c.nombre}`,'🗑','#fcebeb');}
+  // notas
+  function getNotas(){return[..._db.notas];}
+  function getNota(id){return _db.notas.find(n=>n.id===id);}
+  async function guardarNota(nota){
+    if(nota.id){const i=_db.notas.findIndex(n=>n.id===nota.id);if(i>=0)_db.notas[i]={..._db.notas[i],...nota,actualizadoEn:new Date().toISOString()};}
+    else{const n={...nota,id:_nid(_db.notas),creadoEn:new Date().toISOString(),actualizadoEn:new Date().toISOString()};_db.notas.unshift(n);agregarActividad('nota',`<strong>Nota creada:</strong> ${n.titulo||'Sin título'}`,'📝','#e6f1fb');}
+    await _save('notas');
+  }
+  async function eliminarNota(id){const n=_db.notas.find(n=>n.id===id);_db.notas=_db.notas.filter(n=>n.id!==id);await _save('notas');if(n)agregarActividad('nota',`Nota <strong>eliminada:</strong> ${n.titulo}`,'🗑','#fcebeb');}
+  // actividad
+  function getActividad(){return[..._db.actividad].sort((a,b)=>new Date(b.tiempo)-new Date(a.tiempo));}
+  async function agregarActividad(tipo,texto,icono,color){const a={id:_nid(_db.actividad),tipo,texto,icono,color,tiempo:new Date().toISOString()};_db.actividad.unshift(a);if(_db.actividad.length>100)_db.actividad=_db.actividad.slice(0,100);await _save('actividad');return a;}
+  function buscar(q){const l=q.toLowerCase();return{tareas:_db.tareas.filter(t=>t.titulo.toLowerCase().includes(l)),clientes:_db.clientes.filter(c=>c.nombre.toLowerCase().includes(l)),notas:_db.notas.filter(n=>n.titulo.toLowerCase().includes(l)||n.cuerpo.toLowerCase().includes(l))};}
+  return{init,getTareas,agregarTarea,actualizarTarea,eliminarTarea,getClientes,getCliente,agregarCliente,actualizarCliente,eliminarCliente,getNotas,getNota,guardarNota,eliminarNota,getActividad,agregarActividad,buscar};
+})();
+
+// ---------- UTILIDADES ----------
+const U={
+  fecha:s=>!s?'':new Date(s+'T12:00:00').toLocaleDateString('es-MX',{day:'numeric',month:'short'}),
+  fechaHora:iso=>!iso?'':new Date(iso).toLocaleString('es-MX',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}),
+  hace:iso=>{if(!iso)return'';const d=Date.now()-new Date(iso).getTime(),m=Math.floor(d/60000);if(m<1)return'ahora mismo';if(m<60)return`hace ${m}m`;const h=Math.floor(m/60);if(h<24)return`hace ${h}h`;return`hace ${Math.floor(h/24)}d`;},
+  hoy:()=>new Date().toISOString().split('T')[0],
+  esc:s=>(s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;'),
+  iconoArchivo:m=>m==='application/vnd.google-apps.folder'?'📁':m==='application/pdf'?'📄':m&&m.startsWith('image/')?'🖼':m&&(m.includes('word')||m.includes('document'))?'📝':m&&(m.includes('sheet')||m.includes('excel'))?'📊':m&&m.includes('presentation')?'📋':m&&m.startsWith('video/')?'🎬':'📎',
+  peso:b=>{if(!b)return'';b=parseInt(b);if(b<1024)return b+' B';if(b<1048576)return Math.round(b/1024)+' KB';return(b/1048576).toFixed(1)+' MB';}
+};
+
+// ---------- NAVEGACIÓN ----------
+const NAV=[
+  {id:'inicio',label:'Inicio',icon:'<rect x="1" y="1" width="6" height="6" rx="1.2"/><rect x="9" y="1" width="6" height="6" rx="1.2"/><rect x="1" y="9" width="6" height="6" rx="1.2"/><rect x="9" y="9" width="6" height="6" rx="1.2"/>'},
+  {id:'tareas',label:'Tareas',icon:'<path d="M2 4h12M2 8h8M2 12h10" stroke-linecap="round"/>'},
+  {id:'calendario',label:'Calendario',icon:'<rect x="1.5" y="2.5" width="13" height="12" rx="1.5"/><path d="M1.5 6.5h13M5 1v3M11 1v3" stroke-linecap="round"/>'},
+  {id:'archivos',label:'Archivos',icon:'<path d="M2 3.5A1.5 1.5 0 013.5 2h4.086a1.5 1.5 0 011.06.44l.915.914A1.5 1.5 0 0010.62 3.5H12.5A1.5 1.5 0 0114 5v7a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 12V3.5z"/>'},
+  {id:'correo',label:'Correo',icon:'<path d="M2 4l6 4 6-4M2 4h12v8H2V4z" stroke-linejoin="round"/>'},
+  {id:'clientes',label:'Clientes',icon:'<circle cx="6" cy="5" r="3"/><path d="M1 13c0-2.761 2.239-4 5-4s5 1.239 5 4" stroke-linecap="round"/>'},
+  {id:'actividad',label:'Actividad',icon:'<circle cx="8" cy="8" r="6.5"/><path d="M8 4.5v4l2.5 2" stroke-linecap="round"/>'},
+  {id:'notas',label:'Notas',icon:'<path d="M3 2h10a1 1 0 011 1v9l-3 3H3a1 1 0 01-1-1V3a1 1 0 011-1z"/><path d="M5 6h6M5 9h4" stroke-linecap="round"/>'},
+];
+
+const Vistas=(()=>{
+  let _cur='inicio';
+  function renderNav(){
+    document.getElementById('nav').innerHTML=NAV.map(n=>`<button class="ni${n.id===_cur?' active':''}" onclick="Vistas.ir('${n.id}')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">${n.icon}</svg><span>${n.label}</span></button>`).join('');
+  }
+  function ir(name){
+    _cur=name;renderNav();
+    const m=document.getElementById('main');
+    ({inicio:Inicio,tareas:Tareas,calendario:Calendario,archivos:Archivos,correo:Correo,clientes:Clientes,actividad:Actividad,notas:Notas})[name].render(m);
+  }
+  return{ir,renderNav,cur:()=>_cur};
+})();
+
+// ---------- VISTA: INICIO ----------
+const Inicio={render(el){
+  const tareas=Data.getTareas(),clientes=Data.getClientes(),hoy=U.hoy();
+  const abiertas=tareas.filter(t=>!t.done),vencidas=abiertas.filter(t=>t.fecha&&t.fecha<hoy),hoyTareas=abiertas.filter(t=>t.fecha===hoy);
+  const act=Data.getActividad().slice(0,5);
+  const h=new Date().getHours(),saludo=h<12?'Buenos días':h<18?'Buenas tardes':'Buenas noches';
+  el.innerHTML=`<div class="view active">
+    <div class="ph"><div><div class="pt">${saludo}, ${(Auth.getUser()?.name||'').split(' ')[0]} 👋</div><div class="psub">${new Date().toLocaleDateString('es-MX',{weekday:'long',day:'numeric',month:'long',year:'numeric'})}</div></div>
+    <div style="display:flex;gap:8px"><button class="btn" onclick="Vistas.ir('tareas')">Ver tareas</button><button class="btn btnp" onclick="Tareas.nueva()">+ Nueva tarea</button></div></div>
+    ${Auth.isDemo()?`<div class="banner"><span><strong>Modo demo</strong> — agrega tu Google Client ID en config.js para activar Drive, Calendar y Gmail reales.</span><a href="https://console.cloud.google.com" target="_blank" class="btn btns">Configurar →</a></div>`:''}
+    <div class="stats">
+      <div class="sc"><div class="sn">${abiertas.length}</div><div class="sl">Tareas abiertas</div></div>
+      <div class="sc"><div class="sn" style="color:${vencidas.length?'var(--red)':'inherit'}">${vencidas.length}</div><div class="sl">Vencidas</div></div>
+      <div class="sc"><div class="sn" style="color:var(--accent)">${hoyTareas.length}</div><div class="sl">Para hoy</div></div>
+      <div class="sc"><div class="sn">${clientes.filter(c=>c.estatus==='activo').length}</div><div class="sl">Clientes activos</div></div>
+    </div>
+    <div class="two">
+      <div class="card"><div class="slabel">Próximas tareas</div>${this._proximas(abiertas,hoy)}<button class="btn btns" style="margin-top:14px" onclick="Vistas.ir('tareas')">Todas las tareas →</button></div>
+      <div class="card"><div class="slabel">Actividad reciente</div>${act.length?act.map(a=>`<div class="ai" style="padding:8px 0"><div class="adot" style="background:${a.color};width:26px;height:26px;font-size:12px">${a.icono}</div><div><div class="at" style="font-size:13px">${a.texto}</div><div class="atm">${U.hace(a.tiempo)}</div></div></div>`).join(''):'<div class="esub">Sin actividad aún</div>'}<button class="btn btns" style="margin-top:14px" onclick="Vistas.ir('actividad')">Ver todo →</button></div>
+    </div>
+    <div class="card" style="margin-top:16px"><div class="slabel">Clientes</div><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin-top:10px">${clientes.map(c=>`<div style="display:flex;align-items:center;gap:10px;padding:10px;border:1px solid var(--border);border-radius:var(--r);cursor:pointer" onclick="Vistas.ir('clientes')"><div style="width:34px;height:34px;border-radius:8px;background:${c.color}22;display:flex;align-items:center;justify-content:center;font-size:16px">${c.emoji}</div><div><div style="font-size:13px;font-weight:500">${c.nombre}</div><div class="sbadge ${c.estatus==='activo'?'sact':'sinact'}" style="font-size:10px;padding:1px 6px;margin-top:2px">${c.estatus==='activo'?'Activo':'Inactivo'}</div></div></div>`).join('')}<div style="display:flex;align-items:center;justify-content:center;padding:10px;border:1px dashed var(--border2);border-radius:var(--r);cursor:pointer;color:var(--text3);font-size:13px" onclick="Clientes.nuevo()">+ Agregar cliente</div></div></div>
+  </div>`;
+},_proximas(abiertas,hoy){
+  const s=abiertas.filter(t=>t.fecha).sort((a,b)=>a.fecha.localeCompare(b.fecha)).slice(0,5);
+  if(!s.length)return'<div class="empty" style="padding:20px"><div class="etitle">¡Todo al día!</div></div>';
+  return s.map(t=>{const ov=t.fecha<hoy,cl=Data.getCliente(t.clienteId);return`<div class="ti"><div class="ck${t.done?' done':''}" onclick="Tareas.toggle(${t.id})"></div><div class="tbody"><div class="tn">${t.titulo}</div><div class="tmr">${cl?`<span class="tag tgr">${cl.emoji} ${cl.nombre}</span>`:''}<span class="dd${ov?' ov':''}">${ov?'Vencida · ':''}${U.fecha(t.fecha)}</span></div></div></div>`;}).join('');
+}};
+
+// ---------- VISTA: TAREAS ----------
+const Tareas={_filtro:'todas',render(el){
+  const tareas=Data.getTareas();
+  el.innerHTML=`<div class="view active">
+    <div class="ph"><div><div class="pt">Tareas</div><div class="psub">${tareas.filter(t=>!t.done).length} abiertas · ${tareas.filter(t=>t.done).length} completadas</div></div><button class="btn btnp" onclick="Tareas.nueva()">+ Nueva tarea</button></div>
+    <div style="display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap">${['todas','mías','elizabeth','vencidas','hoy'].map(f=>`<button class="btn btns${this._filtro===f?' btnp':''}" onclick="Tareas.setFiltro('${f}')">${({todas:'Todas',mías:'Mías',elizabeth:'Elizabeth',vencidas:'Vencidas',hoy:'Para hoy'})[f]}</button>`).join('')}</div>
+    <div class="card" style="padding:0;overflow:hidden"><div style="padding:14px 20px;border-bottom:1px solid var(--border)"><span class="slabel" style="margin:0">${this._filtradas(tareas).length} tareas</span></div><div style="padding:0 20px" id="tlist"></div></div>
+  </div>`;this._lista();
+},_filtradas(tareas){const hoy=U.hoy();return tareas.filter(t=>{if(this._filtro==='mías')return!t.done&&(t.asignado==='ambos'||t.asignado==='santiago');if(this._filtro==='elizabeth')return!t.done&&(t.asignado==='ambos'||t.asignado==='elizabeth');if(this._filtro==='vencidas')return!t.done&&t.fecha&&t.fecha<hoy;if(this._filtro==='hoy')return!t.done&&t.fecha===hoy;return true;});},
+_lista(){const el=document.getElementById('tlist');if(!el)return;const hoy=U.hoy();const f=this._filtradas(Data.getTareas()).sort((a,b)=>{if(a.done!==b.done)return a.done?1:-1;if(!a.fecha&&!b.fecha)return 0;if(!a.fecha)return 1;if(!b.fecha)return -1;return a.fecha.localeCompare(b.fecha);});
+if(!f.length){el.innerHTML='<div class="empty"><div class="eic">✓</div><div class="etitle">Sin tareas aquí</div></div>';return;}
+el.innerHTML=f.map(t=>{const ov=!t.done&&t.fecha&&t.fecha<hoy,cl=Data.getCliente(t.clienteId);const ac=t.asignado==='elizabeth'?'tb':t.asignado==='ambos'?'tgr':'tg';const al={santiago:'Santiago',elizabeth:'Elizabeth',ambos:'Ambos'}[t.asignado]||t.asignado;return`<div class="ti"><div class="ck${t.done?' done':''}" onclick="Tareas.toggle(${t.id})"></div><div class="tbody"><div class="tn${t.done?' done':''}">${t.titulo}</div><div class="tmr"><span class="tag ${ac}">${al}</span>${cl?`<span class="tag tgr">${cl.emoji} ${cl.nombre}</span>`:''}${t.prioridad==='alta'&&!t.done?'<span class="tag tr">Alta</span>':''}${t.fecha?`<span class="dd${ov?' ov':''}">${ov?'Vencida · ':''}${U.fecha(t.fecha)}</span>`:''}</div></div><div class="tact"><button class="ibtn" onclick="Tareas.editar(${t.id})">✎</button><button class="ibtn" onclick="Tareas.eliminar(${t.id})">×</button></div></div>`;}).join('');},
+async toggle(id){const t=Data.getTareas().find(t=>t.id===id);if(t)await Data.actualizarTarea(id,{done:!t.done});Vistas.ir(Vistas.cur());},
+async eliminar(id){if(!confirm('¿Eliminar esta tarea?'))return;await Data.eliminarTarea(id);Vistas.ir(Vistas.cur());App.toast('Tarea eliminada');},
+setFiltro(f){this._filtro=f;this.render(document.getElementById('main'));},
+nueva(){const cs=Data.getClientes();App.modal('Nueva tarea',`<div class="fg"><label class="fl">Título</label><input class="fi" id="mt" placeholder="Descripción de la tarea..." /></div><div class="fg"><label class="fl">Cliente</label><select class="fi" id="mc"><option value="">Sin cliente</option>${cs.map(c=>`<option value="${c.id}">${c.emoji} ${c.nombre}</option>`).join('')}</select></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="fg"><label class="fl">Fecha límite</label><input type="date" class="fi" id="mf" /></div><div class="fg"><label class="fl">Asignar a</label><select class="fi" id="ma"><option value="ambos">Ambos</option><option value="santiago">Santiago</option><option value="elizabeth">Elizabeth</option></select></div></div><div class="fg"><label class="fl">Prioridad</label><select class="fi" id="mp"><option value="normal">Normal</option><option value="alta">Alta</option><option value="baja">Baja</option></select></div>`,async()=>{const t=document.getElementById('mt').value.trim();if(!t){App.toast('Escribe un título');return false;}const nuevaTarea=await Data.agregarTarea({titulo:t,clienteId:parseInt(document.getElementById('mc').value)||null,fecha:document.getElementById('mf').value||null,asignado:document.getElementById('ma').value,prioridad:document.getElementById('mp').value});if(nuevaTarea.fecha)agregarTareaACalendario(nuevaTarea);Vistas.ir(Vistas.cur());App.toast('Tarea agregada ✓');});},
+editar(id){const t=Data.getTareas().find(t=>t.id===id);if(!t)return;const cs=Data.getClientes();App.modal('Editar tarea',`<div class="fg"><label class="fl">Título</label><input class="fi" id="mt" value="${U.esc(t.titulo)}" /></div><div class="fg"><label class="fl">Cliente</label><select class="fi" id="mc"><option value="">Sin cliente</option>${cs.map(c=>`<option value="${c.id}" ${t.clienteId===c.id?'selected':''}>${c.emoji} ${c.nombre}</option>`).join('')}</select></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="fg"><label class="fl">Fecha límite</label><input type="date" class="fi" id="mf" value="${t.fecha||''}" /></div><div class="fg"><label class="fl">Asignar a</label><select class="fi" id="ma"><option value="ambos" ${t.asignado==='ambos'?'selected':''}>Ambos</option><option value="santiago" ${t.asignado==='santiago'?'selected':''}>Santiago</option><option value="elizabeth" ${t.asignado==='elizabeth'?'selected':''}>Elizabeth</option></select></div></div><div class="fg"><label class="fl">Prioridad</label><select class="fi" id="mp"><option value="normal" ${t.prioridad==='normal'?'selected':''}>Normal</option><option value="alta" ${t.prioridad==='alta'?'selected':''}>Alta</option><option value="baja" ${t.prioridad==='baja'?'selected':''}>Baja</option></select></div>`,async()=>{await Data.actualizarTarea(id,{titulo:document.getElementById('mt').value.trim(),clienteId:parseInt(document.getElementById('mc').value)||null,fecha:document.getElementById('mf').value||null,asignado:document.getElementById('ma').value,prioridad:document.getElementById('mp').value});Vistas.ir(Vistas.cur());App.toast('Tarea actualizada');});}};
+
+// ---------- VISTA: CORREO (Gmail real) ----------
+const Correo={
+  _emails:[],_loading:false,_activeId:null,
+  async render(el){
+    el.innerHTML=`<div class="view active">
+      <div class="ph"><div><div class="pt">Correo</div><div class="psub">Emails de tus clientes</div></div>
+      <button class="btn" onclick="Correo.cargar()">↻ Actualizar</button></div>
+      <div id="correo-body"><div style="text-align:center;padding:40px;color:var(--text3)">Cargando emails...</div></div>
+    </div>`;
+    await this.cargar();
+  },
+  async cargar(){
+    const el=document.getElementById('correo-body');
+    if(!el)return;
+    el.innerHTML='<div style="text-align:center;padding:40px;color:var(--text3)">Cargando...</div>';
+    try{
+      const token=Auth.getToken();
+      const res=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&q=in:inbox',{
+        headers:{Authorization:'Bearer '+token}
+      });
+      const data=await res.json();
+      if(!data.messages||!data.messages.length){el.innerHTML='<div class="empty"><div class="eic">📭</div><div class="etitle">Sin emails</div></div>';return;}
+      // Cargar detalles de cada email
+      const emails=await Promise.all(data.messages.slice(0,10).map(m=>this._getEmail(m.id,token)));
+      this._emails=emails.filter(Boolean);
+      this._renderLista(el);
+    }catch(e){
+      console.error('Gmail error',e);
+      el.innerHTML='<div class="empty"><div class="eic">⚠️</div><div class="etitle">Error al cargar emails</div><div class="esub">Verifica que Gmail API esté activa</div></div>';
+    }
+  },
+  async _getEmail(id,token){
+    try{
+      const res=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,{
+        headers:{Authorization:'Bearer '+token}
+      });
+      const m=await res.json();
+      const headers=m.payload?.headers||[];
+      const get=n=>headers.find(h=>h.name===n)?.value||'';
+      const from=get('From');
+      const name=from.includes('<')?from.split('<')[0].trim().replace(/"/g,''):from.split('@')[0];
+      const email=from.match(/<(.+)>/)?.[1]||from;
+      const unread=m.labelIds?.includes('UNREAD')||false;
+      // Match cliente
+      const clientes=Data.getClientes();
+      const cliente=clientes.find(c=>c.contacto&&email.toLowerCase().includes(c.contacto.split('@')[1]?.toLowerCase()))||null;
+      return{id:m.id,nombre:name,email,asunto:get('Subject')||'(Sin asunto)',snippet:m.snippet||'',fecha:get('Date'),noLeido:unread,clienteId:cliente?.id||null};
+    }catch(e){return null;}
+  },
+  _renderLista(el){
+    if(!this._emails.length){el.innerHTML='<div class="empty"><div class="eic">📭</div><div class="etitle">Sin emails</div></div>';return;}
+    el.innerHTML=`<div class="card" style="padding:0;overflow:hidden">${this._emails.map(e=>{
+      const cl=Data.getCliente(e.clienteId);
+      const initials=e.nombre.split(' ').map(n=>n[0]).join('').slice(0,2).toUpperCase();
+      return`<div class="email-row${e.noLeido?' unread':''}" onclick="Correo.abrirEmail('${e.id}','${U.esc(e.nombre)}','${U.esc(e.asunto)}')">
+        <div class="eav">${initials}</div>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span class="efrom${e.noLeido?';font-weight:600':''}">${e.nombre}</span>
+            <span class="etime">${this._fmtFecha(e.fecha)}</span>
+          </div>
+          <div class="esubj">${e.asunto}</div>
+          <div class="eprev">${e.snippet}</div>
+          <div style="margin-top:4px">${cl?`<span class="tag tgr">${cl.emoji} ${cl.nombre}</span>`:''}</div>
+        </div>
+      </div>`;
+    }).join('')}</div>`;
+  },
+  async abrirEmail(id,nombre,asunto){
+    const token=Auth.getToken();
+    let cuerpo='Cargando...';
+    try{
+      const res=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,{headers:{Authorization:'Bearer '+token}});
+      const m=await res.json();
+      // Marcar como leído
+      await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}/modify`,{
+        method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+        body:JSON.stringify({removeLabelIds:['UNREAD']})
+      });
+      // Extraer cuerpo
+      const part=m.payload?.parts?.find(p=>p.mimeType==='text/plain')||m.payload;
+      const raw=part?.body?.data||'';
+      cuerpo=raw?atob(raw.replace(/-/g,'+').replace(/_/g,'/')):'(Sin contenido)';
+      if(cuerpo.length>800)cuerpo=cuerpo.slice(0,800)+'...';
+    }catch(e){cuerpo='No se pudo cargar el contenido.';}
+    const email=this._emails.find(e=>e.id===id);
+    const cs=Data.getClientes();
+    App.modal(asunto,`
+      <div style="font-size:13px;color:var(--text2);margin-bottom:12px">De: <strong>${nombre}</strong></div>
+      <div style="font-size:13px;line-height:1.7;color:var(--text);background:var(--surface2);padding:14px;border-radius:var(--rs);margin-bottom:16px;white-space:pre-wrap;max-height:300px;overflow-y:auto">${cuerpo}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btnp" onclick="Correo.responder('${id}','${U.esc(nombre)}','${U.esc(asunto)}')">Responder</button>
+        <button class="btn" onclick="App.closeModal();Correo.convertirTarea('${U.esc(asunto)}','${email?.clienteId||''}')">→ Convertir en tarea</button>
+      </div>`,null,true);
+  },
+  responder(id,nombre,asunto){
+    App.closeModal();
+    const reSubject=asunto.startsWith('Re:')?asunto:'Re: '+asunto;
+    App.modal(`Responder a ${nombre}`,`
+      <div class="fg"><label class="fl">Para</label><input class="fi" value="${nombre}" disabled /></div>
+      <div class="fg"><label class="fl">Asunto</label><input class="fi" id="mr-sub" value="${U.esc(reSubject)}" /></div>
+      <div class="fg"><label class="fl">Mensaje</label><textarea class="fi" id="mr-body" style="min-height:120px" placeholder="Escribe tu respuesta..."></textarea></div>
+    `,async()=>{
+      const body=document.getElementById('mr-body').value.trim();
+      if(!body){App.toast('Escribe un mensaje');return false;}
+      try{
+        const token=Auth.getToken();
+        // Obtener email original para el threadId y to
+        const orig=this._emails.find(e=>e.id===id);
+        const to=orig?.email||'';
+        const subject=document.getElementById('mr-sub').value;
+        const raw=btoa(`To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${body}`).replace(/\+/g,'-').replace(/\//g,'_');
+        await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send',{
+          method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+          body:JSON.stringify({raw})
+        });
+        await Data.agregarActividad('correo',`<strong>Email enviado</strong> a ${to}`,'📧','#e6f1fb');
+        App.toast('Email enviado ✓');
+        await this.cargar();
+      }catch(e){App.toast('Error al enviar');console.error(e);}
+    });
+  },
+  convertirTarea(asunto,clienteId){
+    const cs=Data.getClientes();
+    App.modal('Convertir email en tarea',`
+      <div class="fg"><label class="fl">Título de la tarea</label><input class="fi" id="mt" value="Seguimiento: ${U.esc(asunto)}" /></div>
+      <div class="fg"><label class="fl">Cliente</label><select class="fi" id="mc"><option value="">Sin cliente</option>${cs.map(c=>`<option value="${c.id}" ${String(c.id)===String(clienteId)?'selected':''}>${c.emoji} ${c.nombre}</option>`).join('')}</select></div>
+      <div class="fg"><label class="fl">Fecha límite</label><input type="date" class="fi" id="mf" /></div>
+    `,async()=>{
+      const t=document.getElementById('mt').value.trim();
+      if(!t)return false;
+      await Data.agregarTarea({titulo:t,clienteId:parseInt(document.getElementById('mc').value)||null,fecha:document.getElementById('mf').value||null,asignado:'ambos',prioridad:'normal'});
+      App.toast('Tarea creada desde email');
+    });
+  },
+  _fmtFecha(dateStr){
+    if(!dateStr)return'';
+    try{
+      const d=new Date(dateStr);
+      const hoy=new Date();
+      if(d.toDateString()===hoy.toDateString())return d.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
+      return d.toLocaleDateString('es-MX',{day:'numeric',month:'short'});
+    }catch(e){return'';}
+  }
+};
+
+// ---------- VISTA: CALENDARIO (Personal + Ceneca compartido) ----------
+const Calendario={
+  _a:new Date().getFullYear(),_m:new Date().getMonth(),_eventos:[],_eventosCeneca:[],
+  async render(el){
+    el.innerHTML=`<div class="view active">
+      <div class="ph"><div><div class="pt">Calendario</div><div class="psub">Tu calendario personal + Ceneca</div></div>
+      <button class="btn btnp" onclick="Tareas.nueva()">+ Nueva tarea</button></div>
+      <div style="display:flex;gap:8px;margin-bottom:16px">
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)"><div style="width:12px;height:12px;border-radius:3px;background:var(--accent)"></div>Tareas</div>
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)"><div style="width:12px;height:12px;border-radius:3px;background:var(--blue)"></div>Tu calendario</div>
+        <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)"><div style="width:12px;height:12px;border-radius:3px;background:#9B59B6"></div>Ceneca (compartido)</div>
+      </div>
+      <div class="card">
+        <div class="calnav"><button class="cnb" onclick="Calendario.prev()">‹</button><div class="cmt" id="cmt"></div><button class="cnb" onclick="Calendario.next()">›</button></div>
+        <div class="calh">${['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'].map(d=>`<div>${d}</div>`).join('')}</div>
+        <div class="calg" id="calg"><div style="text-align:center;padding:40px;color:var(--text3);grid-column:1/-1">Cargando...</div></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
+        <div class="card">
+          <div class="slabel">Próximos eventos — Ceneca</div>
+          <div id="eventos-ceneca"><div style="color:var(--text3);font-size:13px">Cargando...</div></div>
+        </div>
+        <div class="card">
+          <div class="slabel">Tu calendario personal</div>
+          <div id="eventos-personal"><div style="color:var(--text3);font-size:13px">Cargando...</div></div>
+        </div>
+      </div>
+    </div>`;
+    await this._cargarEventos();
+    this._grid();
+  },
+  async _cargarEventos(){
+    try{
+      const token=Auth.getToken();
+      const inicio=new Date(this._a,this._m,1).toISOString();
+      const fin=new Date(this._a,this._m+1,0,23,59,59).toISOString();
+      const params=`timeMin=${inicio}&timeMax=${fin}&singleEvents=true&orderBy=startTime&maxResults=30`;
+      // Calendario personal
+      const r1=await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?${params}`,{headers:{Authorization:'Bearer '+token}});
+      const d1=await r1.json();
+      this._eventos=d1.items||[];
+      // Calendario Ceneca compartido
+      if(CONFIG.CALENDAR_ID){
+        const calId=encodeURIComponent(CONFIG.CALENDAR_ID);
+        const r2=await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calId}/events?${params}`,{headers:{Authorization:'Bearer '+token}});
+        const d2=await r2.json();
+        this._eventosCeneca=d2.items||[];
+      }
+    }catch(e){console.error('Calendar error',e);}
+  },
+  _grid(){
+    const M=['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
+    const cmt=document.getElementById('cmt');
+    if(cmt)cmt.textContent=`${M[this._m]} ${this._a}`;
+    const tareas=Data.getTareas().filter(t=>!t.done&&t.fecha);
+    const hoy=U.hoy();
+    const first=new Date(this._a,this._m,1).getDay(),days=new Date(this._a,this._m+1,0).getDate(),prev=new Date(this._a,this._m,0).getDate();
+    // Agrupar por día
+    const porDia={personal:{},ceneca:{}};
+    this._eventos.forEach(e=>{const f=(e.start?.date||e.start?.dateTime||'').split('T')[0];if(f)(porDia.personal[f]=porDia.personal[f]||[]).push(e);});
+    this._eventosCeneca.forEach(e=>{const f=(e.start?.date||e.start?.dateTime||'').split('T')[0];if(f)(porDia.ceneca[f]=porDia.ceneca[f]||[]).push(e);});
+    let h='';
+    for(let i=0;i<first;i++)h+=`<div class="cday other"><div class="dnum">${prev-first+i+1}</div></div>`;
+    for(let d=1;d<=days;d++){
+      const ds=`${this._a}-${String(this._m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const dt=tareas.filter(t=>t.fecha===ds);
+      const ep=porDia.personal[ds]||[];
+      const ec=porDia.ceneca[ds]||[];
+      h+=`<div class="cday${ds===hoy?' today':''}"><div class="dnum">${d}</div>
+        ${dt.slice(0,1).map(t=>`<div class="cev cevg" title="${U.esc(t.titulo)}">${t.titulo}</div>`).join('')}
+        ${ep.slice(0,1).map(e=>`<div class="cev cevb" title="${U.esc(e.summary||'')}">${e.summary||'Evento'}</div>`).join('')}
+        ${ec.slice(0,1).map(e=>`<div class="cev" style="background:#f3e8ff;color:#6b21a8;font-size:11px;padding:2px 5px;border-radius:3px;margin-bottom:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${U.esc(e.summary||'')}">${e.summary||'Evento'}</div>`).join('')}
+        ${(dt.length+ep.length+ec.length)>3?`<div class="cev cevg">+${dt.length+ep.length+ec.length-3} más</div>`:''}
+      </div>`;
+    }
+    const rem=42-first-days;
+    for(let i=1;i<=rem;i++)h+=`<div class="cday other"><div class="dnum">${i}</div></div>`;
+    const calg=document.getElementById('calg');
+    if(calg)calg.innerHTML=h;
+    this._renderListas();
+  },
+  _renderListas(){
+    // Ceneca
+    const elC=document.getElementById('eventos-ceneca');
+    if(elC){
+      const tareas=Data.getTareas().filter(t=>!t.done&&t.fecha).sort((a,b)=>a.fecha.localeCompare(b.fecha)).slice(0,5);
+      const evC=this._eventosCeneca.slice(0,5);
+      if(!tareas.length&&!evC.length){elC.innerHTML='<div style="color:var(--text3);font-size:13px">Sin eventos</div>';}
+      else{
+        elC.innerHTML=[
+          ...tareas.map(t=>`<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);align-items:center"><div style="width:8px;height:8px;border-radius:50%;background:var(--accent);flex-shrink:0"></div><div><div style="font-size:13px">${t.titulo}</div><div style="font-size:11px;color:var(--text3)">${U.fecha(t.fecha)} · Tarea</div></div></div>`),
+          ...evC.map(e=>{const f=(e.start?.date||e.start?.dateTime||'').split('T')[0];return`<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);align-items:center"><div style="width:8px;height:8px;border-radius:50%;background:#9B59B6;flex-shrink:0"></div><div><div style="font-size:13px">${e.summary||'Evento'}</div><div style="font-size:11px;color:var(--text3)">${U.fecha(f)}</div></div></div>`;})
+        ].join('');
+      }
+    }
+    // Personal
+    const elP=document.getElementById('eventos-personal');
+    if(elP){
+      if(!this._eventos.length){elP.innerHTML='<div style="color:var(--text3);font-size:13px">Sin eventos</div>';}
+      else{elP.innerHTML=this._eventos.slice(0,5).map(e=>{const f=(e.start?.date||e.start?.dateTime||'').split('T')[0];const hora=e.start?.dateTime?new Date(e.start.dateTime).toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'}):'Todo el día';return`<div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);align-items:center"><div style="width:8px;height:8px;border-radius:50%;background:var(--blue);flex-shrink:0"></div><div><div style="font-size:13px">${e.summary||'Sin título'}</div><div style="font-size:11px;color:var(--text3)">${U.fecha(f)} · ${hora}</div></div></div>`;}).join('');}
+    }
+  },
+  async prev(){this._m--;if(this._m<0){this._m=11;this._a--;}await this._cargarEventos();this._grid();},
+  async next(){this._m++;if(this._m>11){this._m=0;this._a++;}await this._cargarEventos();this._grid();}
+};
+
+// Función global para agregar tarea al calendario Ceneca
+async function agregarTareaACalendario(tarea){
+  if(!tarea.fecha||!CONFIG.CALENDAR_ID)return;
+  try{
+    const token=Auth.getToken();
+    const calId=encodeURIComponent(CONFIG.CALENDAR_ID);
+    const cl=Data.getCliente(tarea.clienteId);
+    const titulo=`${cl?cl.emoji+' ':''}${tarea.titulo}`;
+    await fetch(`https://www.googleapis.com/calendar/v3/calendars/${calId}/events`,{
+      method:'POST',
+      headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
+      body:JSON.stringify({
+        summary:titulo,
+        description:`Tarea asignada a: ${({santiago:'Santiago',elizabeth:'Elizabeth',ambos:'Ambos'})[tarea.asignado]||tarea.asignado}\nPrioridad: ${tarea.prioridad}`,
+        start:{date:tarea.fecha},
+        end:{date:tarea.fecha},
+        colorId:tarea.prioridad==='alta'?'11':'2'
+      })
+    });
+  }catch(e){console.warn('No se pudo agregar al calendario',e);}
+}
+
+// ---------- VISTA: CLIENTES ----------
+const Clientes={COLORES:['#1D9E75','#378ADD','#EF9F27','#E24B4A','#9B59B6','#E67E22'],EMOJIS:['🏢','📡','⚡','🎯','💡','🚀','🌟','🏆','💼','🔧'],
+render(el){const cs=Data.getClientes(),tareas=Data.getTareas(),notas=Data.getNotas();
+el.innerHTML=`<div class="view active"><div class="ph"><div><div class="pt">Clientes</div><div class="psub">${cs.filter(c=>c.estatus==='activo').length} activos · ${cs.filter(c=>c.estatus==='inactivo').length} inactivos</div></div><button class="btn btnp" onclick="Clientes.nuevo()">+ Agregar cliente</button></div>
+${cs.length?`<div class="cgrid">${cs.map(c=>{const ct=tareas.filter(t=>t.clienteId===c.id&&!t.done).length,cn=notas.filter(n=>n.clienteId===c.id).length;return`<div class="ccard" onclick="Clientes.detalle(${c.id})"><div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px"><div class="cav" style="background:${c.color}22">${c.emoji}</div><span class="sbadge ${c.estatus==='activo'?'sact':'sinact'}">${c.estatus==='activo'?'Activo':'Inactivo'}</span></div><div class="cnm">${c.nombre}</div><div class="csb">${c.sector||'Sin sector'}</div><div class="cst"><div class="csi"><strong>${ct}</strong> tareas abiertas</div><div class="csi"><strong>${cn}</strong> notas</div></div><div style="display:flex;gap:6px;margin-top:12px"><button class="btn btns" onclick="event.stopPropagation();Vistas.ir('archivos')" style="flex:1">Archivos</button><button class="btn btns" onclick="event.stopPropagation();Clientes.editar(${c.id})" style="flex:1">Editar</button></div></div>`;}).join('')}<div class="ccard" style="display:flex;align-items:center;justify-content:center;border:1px dashed var(--border2);color:var(--text3);font-size:13px;min-height:180px" onclick="Clientes.nuevo()">+ Agregar cliente</div></div>`:'<div class="empty"><div class="eic">👤</div><div class="etitle">Sin clientes aún</div></div>'}</div>`;
+},detalle(id){const c=Data.getCliente(id);if(!c)return;const tareas=Data.getTareas().filter(t=>t.clienteId===id),notas=Data.getNotas().filter(n=>n.clienteId===id),abiertas=tareas.filter(t=>!t.done),hoy=U.hoy();App.modal(c.nombre,`<div style="display:flex;align-items:center;gap:12px;margin-bottom:20px"><div style="width:48px;height:48px;border-radius:12px;background:${c.color}22;display:flex;align-items:center;justify-content:center;font-size:22px">${c.emoji}</div><div><div style="font-size:16px;font-weight:500">${c.nombre}</div><div style="font-size:13px;color:var(--text2)">${c.sector||''}</div><span class="sbadge ${c.estatus==='activo'?'sact':'sinact'}" style="margin-top:4px">${c.estatus==='activo'?'Activo':'Inactivo'}</span></div></div>${c.contacto?`<div style="font-size:13px;color:var(--text2);margin-bottom:14px">📧 ${c.contacto}</div>`:''}${c.notas?`<div style="font-size:13px;color:var(--text2);background:var(--surface2);padding:10px 12px;border-radius:var(--rs);margin-bottom:16px">${c.notas}</div>`:''}<div class="slabel">Tareas abiertas (${abiertas.length})</div>${abiertas.length?abiertas.slice(0,4).map(t=>`<div class="ti" style="padding:8px 0"><div class="ck" onclick="Tareas.toggle(${t.id})"></div><div class="tbody"><div class="tn">${t.titulo}</div>${t.fecha?`<div class="dd${t.fecha<hoy?' ov':''}" style="margin-top:2px">${t.fecha<hoy?'Vencida · ':''}${U.fecha(t.fecha)}</div>`:''}</div></div>`).join(''):'<div class="esub" style="padding:8px 0">Sin tareas abiertas</div>'}<div class="divider"></div><div class="slabel">Notas (${notas.length})</div>${notas.length?notas.slice(0,3).map(n=>`<div style="padding:8px 0;border-bottom:1px solid var(--border)"><div style="font-size:13px;font-weight:500">${n.titulo}</div><div style="font-size:12px;color:var(--text3);margin-top:2px">${n.cuerpo.slice(0,80)}${n.cuerpo.length>80?'...':''}</div></div>`).join(''):'<div class="esub">Sin notas aún</div>'}`,null,true);},
+nuevo(){App.modal('Agregar cliente',`<div class="fg"><label class="fl">Nombre de la empresa</label><input class="fi" id="cn" placeholder="Acme Corp" /></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="fg"><label class="fl">Sector</label><input class="fi" id="cs" placeholder="Tecnología" /></div><div class="fg"><label class="fl">Estatus</label><select class="fi" id="ce"><option value="activo">Activo</option><option value="inactivo">Inactivo</option></select></div></div><div class="fg"><label class="fl">Email de contacto</label><input class="fi" id="cc" placeholder="contacto@empresa.com" /></div><div class="fg"><label class="fl">Notas</label><textarea class="fi" id="cno" placeholder="Notas sobre este cliente..."></textarea></div><div class="fg"><label class="fl">Ícono</label><div style="display:flex;gap:6px;flex-wrap:wrap">${this.EMOJIS.map(e=>`<button type="button" style="font-size:20px;background:none;border:1px solid var(--border);border-radius:6px;padding:4px 8px;cursor:pointer" onclick="document.getElementById('ci').value='${e}';this.parentElement.querySelectorAll('button').forEach(b=>b.style.borderColor='var(--border)');this.style.borderColor='var(--accent)'">${e}</button>`).join('')}</div><input type="hidden" id="ci" value="🏢" /></div>`,async()=>{const n=document.getElementById('cn').value.trim();if(!n){App.toast('Escribe un nombre');return false;}const idx=Data.getClientes().length%this.COLORES.length;await Data.agregarCliente({nombre:n,sector:document.getElementById('cs').value.trim(),estatus:document.getElementById('ce').value,contacto:document.getElementById('cc').value.trim(),notas:document.getElementById('cno').value.trim(),color:this.COLORES[idx],emoji:document.getElementById('ci').value});Vistas.ir(Vistas.cur());App.toast('Cliente agregado');});},
+editar(id){const c=Data.getCliente(id);if(!c)return;App.modal('Editar cliente',`<div class="fg"><label class="fl">Nombre</label><input class="fi" id="cn" value="${U.esc(c.nombre)}" /></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="fg"><label class="fl">Sector</label><input class="fi" id="cs" value="${U.esc(c.sector||'')}" /></div><div class="fg"><label class="fl">Estatus</label><select class="fi" id="ce"><option value="activo" ${c.estatus==='activo'?'selected':''}>Activo</option><option value="inactivo" ${c.estatus==='inactivo'?'selected':''}>Inactivo</option></select></div></div><div class="fg"><label class="fl">Email de contacto</label><input class="fi" id="cc" value="${U.esc(c.contacto||'')}" /></div><div class="fg"><label class="fl">Notas</label><textarea class="fi" id="cno">${U.esc(c.notas||'')}</textarea></div><button class="btn btnd btns" onclick="Clientes.eliminar(${id})" style="margin-top:8px">Eliminar cliente</button>`,async()=>{await Data.actualizarCliente(id,{nombre:document.getElementById('cn').value.trim(),sector:document.getElementById('cs').value.trim(),estatus:document.getElementById('ce').value,contacto:document.getElementById('cc').value.trim(),notas:document.getElementById('cno').value.trim()});Vistas.ir(Vistas.cur());App.toast('Cliente actualizado');});},
+async eliminar(id){App.closeModal();if(!confirm('¿Eliminar este cliente?'))return;await Data.eliminarCliente(id);Vistas.ir(Vistas.cur());App.toast('Cliente eliminado');}};
+
+// ---------- VISTA: ACTIVIDAD ----------
+const Actividad={render(el){const a=Data.getActividad();el.innerHTML=`<div class="view active"><div class="ph"><div><div class="pt">Actividad</div><div class="psub">Todo lo que ha pasado en tu workspace</div></div></div><div class="card">${a.length?a.map(x=>`<div class="ai"><div class="adot" style="background:${x.color}">${x.icono}</div><div><div class="at">${x.texto}</div><div class="atm">${U.hace(x.tiempo)} · ${U.fechaHora(x.tiempo)}</div></div></div>`).join(''):'<div class="empty"><div class="eic">🕐</div><div class="etitle">Sin actividad aún</div><div class="esub">Las acciones que tú y Elizabeth realicen aparecerán aquí</div></div>'}</div></div>`;}};
+
+// ---------- VISTA: NOTAS ----------
+const Notas={_activa:null,_timer:null,render(el){const notas=Data.getNotas();el.innerHTML=`<div class="view active"><div class="ph"><div class="pt">Notas</div><button class="btn btnp" onclick="Notas.nueva()">+ Nueva nota</button></div><div class="nlay"><div class="nsb" id="nsb"></div><div class="ned" id="ned"><div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text3)">Selecciona una nota o crea una nueva</div></div></div></div>`;this._lista(notas);if(!this._activa&&notas.length)this._activa=notas[0].id;if(this._activa){const n=Data.getNota(this._activa);if(n)this._editor(n);}},
+_lista(notas){const el=document.getElementById('nsb');if(!el)return;if(!notas.length){el.innerHTML='<div class="empty" style="padding:20px"><div class="esub">Sin notas aún</div></div>';return;}el.innerHTML=`<div style="padding:10px 14px;border-bottom:1px solid var(--border)"><input class="si" style="width:100%;font-size:12px;padding:6px 10px" placeholder="Buscar notas..." oninput="Notas.buscar(this.value)" /></div>`+notas.map(n=>`<div class="nit${n.id===this._activa?' active':''}" onclick="Notas.abrir(${n.id})"><div class="nitt">${n.titulo||'Sin título'}</div><div class="nip">${n.cuerpo||'Nota vacía'}</div><div class="nid">${U.hace(n.actualizadoEn)}</div></div>`).join('');},
+abrir(id){this._activa=id;const n=Data.getNota(id);if(n)this._editor(n);this._lista(Data.getNotas());},
+_editor(n){const el=document.getElementById('ned');if(!el)return;const cs=Data.getClientes();el.innerHTML=`<div class="neh"><input class="nti" id="nt" value="${U.esc(n.titulo||'')}" placeholder="Título de la nota..." oninput="Notas.guardar()" /><select id="nc" onchange="Notas.guardar()" style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:var(--rs);background:var(--surface);color:var(--text2)"><option value="">Sin cliente</option>${cs.map(c=>`<option value="${c.id}" ${n.clienteId===c.id?'selected':''}>${c.emoji} ${c.nombre}</option>`).join('')}</select><button class="ibtn" style="color:var(--red)" onclick="Notas.eliminar(${n.id})">🗑</button></div><textarea class="nbi" id="nb" placeholder="Escribe aquí..." oninput="Notas.guardar()">${U.esc(n.cuerpo||'')}</textarea><div style="padding:8px 16px;border-top:1px solid var(--border);font-size:11px;color:var(--text3)">Última actualización ${U.fechaHora(n.actualizadoEn)} · Guardado automáticamente</div>`;},
+guardar(){clearTimeout(this._timer);this._timer=setTimeout(async()=>{if(!this._activa)return;await Data.guardarNota({id:this._activa,titulo:document.getElementById('nt')?.value||'',cuerpo:document.getElementById('nb')?.value||'',clienteId:parseInt(document.getElementById('nc')?.value)||null});this._lista(Data.getNotas());},800);},
+async nueva(){await Data.guardarNota({titulo:'',cuerpo:'',clienteId:null});this._activa=Data.getNotas()[0]?.id;this.render(document.getElementById('main'));},
+async eliminar(id){if(!confirm('¿Eliminar esta nota?'))return;this._activa=null;await Data.eliminarNota(id);this.render(document.getElementById('main'));App.toast('Nota eliminada');},
+buscar(q){const notas=q?Data.getNotas().filter(n=>n.titulo.toLowerCase().includes(q.toLowerCase())||n.cuerpo.toLowerCase().includes(q.toLowerCase())):Data.getNotas();this._lista(notas);}};
+
+// ---------- APP BOOTSTRAP ----------
+const App=(()=>{
+  let _root=null;
+  async function init(){
+    await Auth.init();
+    document.getElementById('signin').addEventListener('click',()=>Auth.signIn());
+    document.getElementById('signout').addEventListener('click',()=>Auth.signOut());
+    document.getElementById('modal').addEventListener('click',e=>{if(e.target===document.getElementById('modal'))closeModal();});
+    if(localStorage.getItem('ws_user')&&localStorage.getItem('ws_token'))Auth.signIn();
+  }
+  async function onSignedIn(user,token){
+    const u=user||Auth.getUser();
+    if(!u||!u.email){console.warn('No user, retrying...');setTimeout(()=>Auth.signIn(),500);return;}
+    document.getElementById('auth').classList.add('hidden');
+    document.getElementById('app').classList.remove('hidden');
+    document.getElementById('userpill').textContent=u.email||'';
+    try{_root=await Drive.ensureFolder(CONFIG.DRIVE_ROOT_FOLDER);await Data.init(_root);}
+    catch(e){console.warn('Drive init failed',e);await Data.init(null);}
+    Vistas.ir('inicio');
+  }
+  function rootFolderId(){return _root;}
+  function modal(title,body,onConfirm,viewOnly){
+    const box=document.getElementById('modalbox');
+    box.innerHTML=`<div class="mt">${title}</div><div>${body}</div><div class="ma"><button class="btn" onclick="App.closeModal()">${viewOnly?'Cerrar':'Cancelar'}</button>${!viewOnly?'<button class="btn btnp" id="mconfirm">Guardar</button>':''}</div>`;
+    if(onConfirm)document.getElementById('mconfirm').addEventListener('click',async()=>{const r=await onConfirm();if(r!==false)closeModal();});
+    document.getElementById('modal').classList.remove('hidden');
+    setTimeout(()=>box.querySelector('input,textarea')?.focus(),50);
+  }
+  function closeModal(){document.getElementById('modal').classList.add('hidden');document.getElementById('modalbox').innerHTML='';}
+  function toast(msg,d=2500){const el=document.getElementById('toast');el.textContent=msg;el.classList.remove('hidden');clearTimeout(el._t);el._t=setTimeout(()=>el.classList.add('hidden'),d);}
+  return{init,onSignedIn,rootFolderId,modal,closeModal,toast};
+})();
+
+window.addEventListener('DOMContentLoaded',()=>App.init());
