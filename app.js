@@ -325,10 +325,10 @@ const App=(()=>{
   async function onSignedIn(user,token){
     document.getElementById('auth').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
-    document.getElementById('userpill').textContent=user.email;
+    const u=user||Auth.getUser(); document.getElementById('userpill').textContent=u?.email||'';
     try{_root=await Drive.ensureFolder(CONFIG.DRIVE_ROOT_FOLDER);await Data.init(_root);}
     catch(e){console.warn('Drive init failed',e);await Data.init(null);}
-    Vistas.ir('inicio');
+    async function onSignedIn(user,token){     _user=user||Auth.getUser();     document.getElementById('auth').classList.add('hidden');     document.getElementById('app').classList.remove('hidden');     document.getElementById('userpill').textContent=_user?.email||'';     try{_root=await Drive.ensureFolder(CONFIG.DRIVE_ROOT_FOLDER);await Data.init(_root);}     catch(e){console.warn('Drive init failed',e);await Data.init(null);}     Vistas.ir('inicio');   }
   }
   function rootFolderId(){return _root;}
   function modal(title,body,onConfirm,viewOnly){
