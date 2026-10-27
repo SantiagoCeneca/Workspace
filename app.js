@@ -1,673 +1,889 @@
-// ---------- AUTH — OAuth popup directo con renovación de token ----------
+'use strict';
+// ============================================================
+//  CĒNECA · PENDIENTES
+//  Cada tarea está "en manos" de alguien: un miembro del equipo,
+//  el cliente, la autoridad, o ya está terminada. Pasarla = cambiar
+//  de manos + un motivo corto (Vo.Bo., Correcciones, Firma…).
+// ============================================================
+
+// ---------- UTILIDADES ----------
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+const ahora = () => new Date().toISOString();
+const TZ = 'America/Monterrey';
+const hoy = () => new Date().toLocaleDateString('en-CA', { timeZone: TZ });
+const sumarDias = (ymd, n) => { const d = new Date(ymd + 'T12:00:00'); d.setDate(d.getDate() + n); return d.toLocaleDateString('en-CA'); };
+const fechaCorta = ymd => !ymd ? '' : new Date(ymd + 'T12:00:00').toLocaleDateString('es-MX', { day: 'numeric', month: 'short' });
+const fechaISO = iso => !iso ? '' : new Date(iso).toLocaleDateString('es-MX', { timeZone: TZ, day: 'numeric', month: 'short', year: 'numeric' });
+const fechaHora = iso => !iso ? '' : new Date(iso).toLocaleString('es-MX', { timeZone: TZ, day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+const diaISO = iso => new Date(iso).toLocaleDateString('en-CA', { timeZone: TZ });
+function hace(iso) {
+  if (!iso) return '';
+  const m = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+  if (m < 1) return 'ahora';
+  if (m < 60) return `hace ${m} min`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `hace ${h} h`;
+  const d = Math.floor(h / 24);
+  return d === 1 ? 'ayer' : `hace ${d} días`;
+}
+function fechaRel(ymd) {
+  const h = hoy();
+  if (ymd === h) return 'Hoy';
+  if (ymd === sumarDias(h, 1)) return 'Mañana';
+  if (ymd === sumarDias(h, -1)) return 'Ayer';
+  return fechaCorta(ymd);
+}
+const ls = {
+  get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { } }
+};
+const DEMO = location.protocol === 'file:' || new URLSearchParams(location.search).has('demo');
+
+// ---------- EQUIPO ----------
+const MIEMBROS = CONFIG.MIEMBROS;
+const ESPERA = [{ id: 'cliente', nombre: 'Cliente' }, { id: 'autoridad', nombre: 'Autoridad' }];
+const PRIORIDADES = [
+  { id: 'urgente', nombre: 'Urgente', rank: 0 }, { id: 'alta', nombre: 'Alta', rank: 1 },
+  { id: 'media', nombre: 'Media', rank: 2 }, { id: 'baja', nombre: 'Baja', rank: 3 }
+];
+let YO = null;
+const esMiembro = id => MIEMBROS.some(m => m.id === id);
+const esEspera = id => ESPERA.some(e => e.id === id);
+function nombreDe(id) {
+  if (id === 'terminada') return 'Terminada';
+  return (MIEMBROS.find(m => m.id === id) || ESPERA.find(e => e.id === id) || { nombre: id || '—' }).nombre;
+}
+const otros = () => MIEMBROS.filter(m => m.id !== YO);
+const iniciales = n => (n || '?').split(' ').map(x => x[0]).join('').slice(0, 2).toUpperCase();
+const dotClase = id => esMiembro(id) ? (['santiago', 'elizabeth'].includes(id) ? 'd-' + id : 'd-otro') : (id === 'terminada' ? 'd-otro' : 'd-espera');
+
+// ---------- AUTH (Google OAuth por popup, igual que el Workspace) ----------
 const Auth = (() => {
-  let _user=null,_token=null,_renovando=false;
-
-  function init(){return Promise.resolve();}
-
-  // ¿El token guardado sigue vigente? Los access_token de Google duran ~1 hora.
-  function _tokenVigente(){
-    const exp=parseInt(localStorage.getItem('ws_token_exp')||'0');
-    return exp>Date.now()+30000; // 30s de margen
+  let _user = null, _token = null, _renovando = false;
+  const vigente = () => parseInt(localStorage.getItem('ws_token_exp') || '0') > Date.now() + 30000;
+  function url(prompt) {
+    const hint = _user?.email ? `&login_hint=${encodeURIComponent(_user.email)}` : '';
+    return `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(CONFIG.CLIENT_ID)}&redirect_uri=${encodeURIComponent(location.origin + location.pathname)}&response_type=token&scope=${encodeURIComponent(CONFIG.SCOPES)}&prompt=${prompt}${hint}`;
   }
-
-  function signIn(){
-    const su=localStorage.getItem('ws_user'),st=localStorage.getItem('ws_token');
-    // Solo reutiliza la sesión si el token NO ha expirado.
-    if(su&&st&&_tokenVigente()){
-      _user=JSON.parse(su);_token=st;
-      App.onSignedIn(_user,_token);return;
-    }
-    // Si hay usuario conocido pero el token expiró, intenta renovar en silencio.
-    if(su&&st){
-      _user=JSON.parse(su);
-      renovarSilencioso().then(ok=>{
-        if(ok)App.onSignedIn(_user,_token);
-        else _login('select_account');
-      });
+  function guardarToken(hash) {
+    const p = new URLSearchParams(hash.substring(1));
+    _token = p.get('access_token');
+    localStorage.setItem('ws_token', _token);
+    localStorage.setItem('ws_token_exp', String(Date.now() + parseInt(p.get('expires_in') || '3600') * 1000));
+  }
+  function signIn() {
+    const su = localStorage.getItem('ws_user'), st = localStorage.getItem('ws_token');
+    if (su && st && vigente()) { _user = JSON.parse(su); _token = st; App.onSignedIn(_user); return; }
+    if (su && st) {
+      _user = JSON.parse(su);
+      renovarSilencioso().then(ok => ok ? App.onSignedIn(_user) : login('select_account'));
       return;
     }
-    _login('select_account');
+    login('select_account');
   }
-
-  // Abre el popup de Google para iniciar/renovar sesión.
-  // prompt='none' intenta renovar sin interacción; 'select_account' pide elegir cuenta.
-  function _login(prompt){
-    const scopes=encodeURIComponent(CONFIG.SCOPES);
-    const clientId=encodeURIComponent(CONFIG.CLIENT_ID);
-    const redirect=encodeURIComponent(window.location.origin+window.location.pathname);
-    const loginHint=_user?.email?`&login_hint=${encodeURIComponent(_user.email)}`:'';
-    const url=`https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${redirect}&response_type=token&scope=${scopes}&prompt=${prompt}${loginHint}`;
-    const popup=window.open(url,'googlelogin','width=500,height=600,left=400,top=100');
-    const timer=setInterval(()=>{
-      try{
-        if(popup.closed){clearInterval(timer);return;}
-        const hash=popup.location.hash;
-        if(hash&&hash.includes('access_token')){
-          clearInterval(timer);
-          _guardarToken(hash);
-          popup.close();
-          fetch('https://www.googleapis.com/oauth2/v3/userinfo',{
-            headers:{Authorization:'Bearer '+_token}
-          }).then(r=>r.json()).then(info=>{
-            _user={name:info.name,email:info.email,picture:info.picture,id:info.sub};
-            localStorage.setItem('ws_user',JSON.stringify(_user));
-            App.onSignedIn(_user,_token);
-          });
+  function login(prompt) {
+    const popup = window.open(url(prompt), 'googlelogin', 'width=500,height=600,left=400,top=100');
+    const timer = setInterval(() => {
+      try {
+        if (!popup || popup.closed) { clearInterval(timer); return; }
+        const hash = popup.location.hash;
+        if (hash && hash.includes('access_token')) {
+          clearInterval(timer); guardarToken(hash); popup.close();
+          fetch('https://www.googleapis.com/oauth2/v3/userinfo', { headers: { Authorization: 'Bearer ' + _token } })
+            .then(r => r.json()).then(info => {
+              _user = { name: info.name, email: info.email, picture: info.picture, id: info.sub };
+              localStorage.setItem('ws_user', JSON.stringify(_user));
+              App._resetAviso(); App.onSignedIn(_user);
+            });
         }
-      }catch(e){/* cross-origin, esperar */}
-    },500);
+      } catch (e) { /* cross-origin mientras está en Google */ }
+    }, 500);
   }
-
-  // Renovación silenciosa con un iframe oculto (prompt=none, sin pop-up visible).
-  function renovarSilencioso(){
-    if(_renovando)return Promise.resolve(false);
-    _renovando=true;
-    return new Promise(resolve=>{
-      const scopes=encodeURIComponent(CONFIG.SCOPES);
-      const clientId=encodeURIComponent(CONFIG.CLIENT_ID);
-      const redirect=encodeURIComponent(window.location.origin+window.location.pathname);
-      const loginHint=_user?.email?`&login_hint=${encodeURIComponent(_user.email)}`:'';
-      const url=`https://accounts.google.com/o/oauth2/v2/auth?client_id=${clientId}&redirect_uri=${redirect}&response_type=token&scope=${scopes}&prompt=none${loginHint}`;
-      const ifr=document.createElement('iframe');
-      ifr.style.display='none';ifr.src=url;
-      let listo=false;
-      const limpiar=ok=>{if(listo)return;listo=true;_renovando=false;clearTimeout(to);try{ifr.remove();}catch(e){}resolve(ok);};
-      const to=setTimeout(()=>limpiar(false),8000);
-      ifr.onload=()=>{
-        try{
-          const hash=ifr.contentWindow.location.hash;
-          if(hash&&hash.includes('access_token')){_guardarToken(hash);limpiar(true);}
-          else limpiar(false);
-        }catch(e){limpiar(false);/* cross-origin = Google pidió interacción, falló silencioso */}
+  function renovarSilencioso() {
+    if (_renovando) return Promise.resolve(false);
+    _renovando = true;
+    return new Promise(resolve => {
+      const ifr = document.createElement('iframe');
+      ifr.style.display = 'none'; ifr.src = url('none');
+      let listo = false;
+      const fin = ok => { if (listo) return; listo = true; _renovando = false; clearTimeout(to); try { ifr.remove(); } catch (e) { } resolve(ok); };
+      const to = setTimeout(() => fin(false), 8000);
+      ifr.onload = () => {
+        try { const h = ifr.contentWindow.location.hash; if (h && h.includes('access_token')) { guardarToken(h); fin(true); } else fin(false); }
+        catch (e) { fin(false); }
       };
       document.body.appendChild(ifr);
     });
   }
-
-  function _guardarToken(hash){
-    const params=new URLSearchParams(hash.substring(1));
-    _token=params.get('access_token');
-    const expIn=parseInt(params.get('expires_in')||'3600');
-    localStorage.setItem('ws_token',_token);
-    localStorage.setItem('ws_token_exp',String(Date.now()+expIn*1000));
+  async function manejarTokenExpirado() { const ok = await renovarSilencioso(); if (!ok) App.avisarReconectar(); return ok; }
+  function signOut() {
+    ['ws_user', 'ws_token', 'ws_token_exp', 'pend_demo_user'].forEach(k => localStorage.removeItem(k));
+    location.reload();
   }
-
-  // Lo llama Drive/Gmail cuando reciben un 401: intenta renovar y reintentar.
-  async function manejarTokenExpirado(){
-    const ok=await renovarSilencioso();
-    if(!ok){
-      // No se pudo renovar en silencio: avisar al usuario para reconectar.
-      App.avisarReconectar();
-    }
-    return ok;
-  }
-
-  function signOut(){localStorage.clear();location.reload();}
-  function getUser(){return _user||JSON.parse(localStorage.getItem('ws_user')||'null');}
-  function getToken(){return _token||localStorage.getItem('ws_token');}
-  function reconectar(){_login('select_account');}
-  return{init,signIn,signOut,getUser,getToken,manejarTokenExpirado,reconectar};
+  return {
+    signIn, signOut, manejarTokenExpirado, reconectar: () => login('select_account'),
+    getUser: () => _user || JSON.parse(localStorage.getItem('ws_user') || 'null'),
+    getToken: () => _token || localStorage.getItem('ws_token')
+  };
 })();
 
 // ---------- DRIVE ----------
 const Drive = (() => {
-  const B='https://www.googleapis.com/drive/v3',U='https://www.googleapis.com/upload/drive/v3';
-  // Parámetros necesarios para que Drive devuelva archivos que están en carpetas
-  // o unidades COMPARTIDAS (de lo contrario la API los oculta por defecto).
-  const SHARED='supportsAllDrives=true&includeItemsFromAllDrives=true';
-  function _h(){return{Authorization:`Bearer ${Auth.getToken()}`,'Content-Type':'application/json'};}
-  async function _r(url,o={},reintento=false){
-    const res=await fetch(url,{headers:_h(),...o});
-    if(res.status===401&&!reintento){
-      // Token expirado: intentar renovarlo y reintentar la llamada una vez.
-      const ok=await Auth.manejarTokenExpirado();
-      if(ok)return _r(url,o,true);
-    }
-    if(!res.ok)throw new Error('Drive '+res.status);
-    return res.json();
+  const B = 'https://www.googleapis.com/drive/v3', U = 'https://www.googleapis.com/upload/drive/v3';
+  const S = 'supportsAllDrives=true&includeItemsFromAllDrives=true';
+  async function req(u, opt = {}, retry = true) {
+    const res = await fetch(u, { cache: 'no-store', ...opt, headers: { Authorization: 'Bearer ' + Auth.getToken(), ...(opt.headers || {}) } });
+    if (res.status === 401 && retry && await Auth.manejarTokenExpirado()) return req(u, opt, false);
+    if (!res.ok) throw new Error('Drive ' + res.status);
+    return res;
   }
-  async function ensureFolder(name,parent='root'){
-    const q=`name='${name}' and mimeType='application/vnd.google-apps.folder' and '${parent}' in parents and trashed=false`;
-    const r=await _r(`${B}/files?q=${encodeURIComponent(q)}&fields=files(id,name)&${SHARED}`);
-    if(r.files.length)return r.files[0].id;
-    const c=await _r(`${B}/files?${SHARED}`,{method:'POST',body:JSON.stringify({name,mimeType:'application/vnd.google-apps.folder',parents:[parent]})});
+  async function buscar(q) {
+    const r = await (await req(`${B}/files?q=${encodeURIComponent(q)}&fields=files(id,name)&${S}`)).json();
+    return r.files[0]?.id || null;
+  }
+  async function carpeta(nombre, padre) {
+    const id = await buscar(`name='${nombre}' and mimeType='application/vnd.google-apps.folder' and '${padre}' in parents and trashed=false`);
+    if (id) return id;
+    const c = await (await req(`${B}/files?${S}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: nombre, mimeType: 'application/vnd.google-apps.folder', parents: [padre] }) })).json();
     return c.id;
   }
-  async function listFiles(folderId){
-    const q=`'${folderId}' in parents and trashed=false`;
-    const r=await _r(`${B}/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,size,modifiedTime,version)&orderBy=folder,name&${SHARED}`);
-    return r.files;
+  const archivo = (nombre, padre) => buscar(`name='${nombre}' and '${padre}' in parents and trashed=false`);
+  async function leer(id) { const t = await (await req(`${B}/files/${id}?alt=media&${S}`)).text(); return t ? JSON.parse(t) : null; }
+  async function escribir(id, data) {
+    await req(`${U}/files/${id}?uploadType=media&${S}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
   }
-  async function uploadFile(file,folderId){
-    const meta={name:file.name,parents:[folderId]};const form=new FormData();
-    form.append('metadata',new Blob([JSON.stringify(meta)],{type:'application/json'}));form.append('file',file);
-    const res=await fetch(`${U}/files?uploadType=multipart&fields=id,name,mimeType,size,modifiedTime,version&${SHARED}`,{method:'POST',headers:{Authorization:`Bearer ${Auth.getToken()}`},body:form});
-    return res.json();
+  async function crear(nombre, padre, data) {
+    const form = new FormData();
+    form.append('metadata', new Blob([JSON.stringify({ name: nombre, parents: [padre] })], { type: 'application/json' }));
+    form.append('file', new Blob([JSON.stringify(data)], { type: 'application/json' }));
+    return (await (await req(`${U}/files?uploadType=multipart&fields=id&${S}`, { method: 'POST', body: form })).json()).id;
   }
-  function downloadUrl(id){return `${B}/files/${id}?alt=media&${SHARED}`;}
-  async function webViewLink(id){const r=await _r(`${B}/files/${id}?fields=webViewLink&${SHARED}`);return r.webViewLink;}
-  async function getVersions(id){const r=await _r(`${B}/files/${id}/revisions?fields=revisions(id,modifiedTime,size)`);return r.revisions||[];}
-  async function deleteFile(id){await fetch(`${B}/files/${id}?${SHARED}`,{method:'DELETE',headers:_h()});}
-  async function saveData(fn,data,root){
-    const q=`name='${fn}' and '${root}' in parents and trashed=false`;
-    const ex=await _r(`${B}/files?q=${encodeURIComponent(q)}&fields=files(id)&${SHARED}`);
-    if(ex.files.length){await fetch(`${U}/files/${ex.files[0].id}?uploadType=media&${SHARED}`,{method:'PATCH',headers:_h(),body:JSON.stringify(data)});}
-    else{const form=new FormData();form.append('metadata',new Blob([JSON.stringify({name:fn,parents:[root]})],{type:'application/json'}));form.append('file',new Blob([JSON.stringify(data)],{type:'application/json'}));await fetch(`${U}/files?uploadType=multipart&${SHARED}`,{method:'POST',headers:{Authorization:`Bearer ${Auth.getToken()}`},body:form});}
-  }
-  async function loadData(fn,root){
-    const q=`name='${fn}' and '${root}' in parents and trashed=false`;
-    const r=await _r(`${B}/files?q=${encodeURIComponent(q)}&fields=files(id)&${SHARED}`);
-    if(!r.files.length)return null;
-    let c=await fetch(`${B}/files/${r.files[0].id}?alt=media&${SHARED}`,{headers:_h()});
-    if(c.status===401){const ok=await Auth.manejarTokenExpirado();if(ok)c=await fetch(`${B}/files/${r.files[0].id}?alt=media&${SHARED}`,{headers:_h()});}
-    if(!c.ok)throw new Error('Drive '+c.status);
-    return c.json();
-  }
-  return{ensureFolder,listFiles,uploadFile,downloadUrl,webViewLink,getVersions,deleteFile,saveData,loadData};
+  return { carpeta, archivo, leer, escribir, crear };
 })();
 
-// ---------- DATOS ----------
-const Data = (() => {
-  let _root=null;
-  let _db={tareas:[],clientes:[],notas:[],actividad:[]};
-  // Datos por defecto vacíos. Los datos reales se cargan desde las carpetas de Drive.
-  // Si Drive falla al cargar, la app arranca vacía en lugar de romperse.
-  const DEF={
-    tareas:[],
-    clientes:[],
-    notas:[],
-    actividad:[]
+// Dónde viven los datos: Drive (normal) o este navegador (modo demo, para probar)
+const Remoto = DEMO ? {
+  async init() { },
+  async cargar() { return ls.get('pend_demo_db', null); },
+  async guardar(d) { ls.set('pend_demo_db', d); }
+} : {
+  folder: null, fileId: null,
+  async init() {
+    this.folder = await Drive.carpeta(CONFIG.DATA_FOLDER, CONFIG.SHARED_FOLDER_ID);
+    this.fileId = await Drive.archivo(CONFIG.DATA_FILE, this.folder);
+  },
+  async cargar() {
+    if (!this.fileId) this.fileId = await Drive.archivo(CONFIG.DATA_FILE, this.folder);
+    return this.fileId ? Drive.leer(this.fileId) : null;
+  },
+  async guardar(d) {
+    if (!this.fileId) this.fileId = await Drive.crear(CONFIG.DATA_FILE, this.folder, d);
+    else await Drive.escribir(this.fileId, d);
+  }
+};
+
+// ---------- DATOS + SINCRONIZACIÓN ----------
+// Todo se guarda con fecha de modificación (upd) y nada se borra de verdad
+// (del:true), para que los cambios de los dos se combinen sin pisarse.
+const vacio = () => ({ v: 2, tareas: {}, clientes: {}, areas: {} });
+let DB = vacio();
+
+function unirLista(a = [], b = []) {
+  const m = new Map();
+  [...a, ...b].forEach(x => { const p = m.get(x.id); if (!p || (x.upd || x.en || '') > (p.upd || p.en || '')) m.set(x.id, x); });
+  return [...m.values()].sort((x, y) => (x.en || '').localeCompare(y.en || ''));
+}
+function unirTarea(x, y) {
+  const n = (y.upd || '') > (x.upd || '') ? y : x;
+  return { ...n, comentarios: unirLista(x.comentarios, y.comentarios), historial: unirLista(x.historial, y.historial) };
+}
+function unir(a, b) {
+  const out = vacio();
+  for (const col of ['tareas', 'clientes', 'areas']) {
+    const A = a[col] || {}, Bc = b[col] || {};
+    for (const id of new Set([...Object.keys(A), ...Object.keys(Bc)])) {
+      const x = A[id], y = Bc[id];
+      out[col][id] = !x ? y : !y ? x : col === 'tareas' ? unirTarea(x, y) : ((y.upd || '') > (x.upd || '') ? y : x);
+    }
+  }
+  return out;
+}
+
+// ¿El resultado combinado tiene algo que el archivo remoto todavía no?
+function tieneNovedades(local, remoto) {
+  for (const col of ['tareas', 'clientes', 'areas']) {
+    for (const [id, x] of Object.entries(local[col] || {})) {
+      const y = (remoto[col] || {})[id];
+      if (!y || y.upd !== x.upd) return true;
+      if (col === 'tareas' && ((x.comentarios || []).length !== (y.comentarios || []).length || (x.historial || []).length !== (y.historial || []).length)) return true;
+    }
+  }
+  return false;
+}
+
+const Sync = {
+  sucio: false, ocupado: false, otraVez: false, timer: null, ok: false,
+  marcar() { this.sucio = true; clearTimeout(this.timer); this.timer = setTimeout(() => this.correr(), 700); UI.estado('Guardando…'); },
+  async correr() {
+    if (this.ocupado) { this.otraVez = true; return; }
+    this.ocupado = true;
+    try {
+      const remoto = await Remoto.cargar() || vacio();
+      const antes = JSON.stringify(DB);
+      DB = unir(DB, remoto);
+      if (this.sucio || tieneNovedades(DB, remoto)) {
+        this.sucio = false;
+        await Remoto.guardar(DB);
+      }
+      if (JSON.stringify(DB) !== antes) UI.render({ remoto: true });
+      this.ok = true;
+      UI.estado('Guardado ✓');
+    } catch (e) {
+      console.error(e); this.sucio = true;
+      UI.estado('Sin conexión · reintentando', true);
+    } finally {
+      this.ocupado = false;
+      if (this.otraVez) { this.otraVez = false; this.correr(); }
+    }
+  }
+};
+
+function tocar(t) { t.upd = ahora(); }
+function guardar(opts) { Sync.marcar(); UI.render(opts); }
+const tareas = () => Object.values(DB.tareas).filter(t => !t.del);
+const activas = () => tareas().filter(t => t.con !== 'terminada');
+const catalogo = col => Object.values(DB[col]).filter(x => !x.del).sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+const nombreCat = (col, id) => (id && DB[col][id]) ? DB[col][id].nombre : '';
+const subs = t => (t.subtareas || []);
+const vencida = t => t.limite && t.con !== 'terminada' && t.limite < hoy();
+
+function sembrarAreas() {
+  if (Object.keys(DB.areas).length) return;
+  CONFIG.AREAS.forEach(n => { const id = 'a-' + n.toLowerCase().normalize('NFD').replace(/[^a-z]/g, ''); DB.areas[id] = { id, nombre: n, upd: '2000-01-01T00:00:00.000Z' }; });
+}
+
+function nuevaTarea(titulo, con, extra = {}) {
+  const t = {
+    id: uid(), titulo, notas: '', cliente: null, area: null, prioridad: 'media', limite: null,
+    con, motivo: '', seguimiento: esMiembro(con) ? con : YO, desde: ahora(),
+    subtareas: [], comentarios: [],
+    historial: [{ id: uid(), en: ahora(), por: YO, de: null, a: con, motivo: 'Creada' }],
+    creada: ahora(), creadaPor: YO, terminada: null, upd: ahora(), ...extra
   };
-  async function init(root){
-    _root=root;
-    for(const k of Object.keys(_db)){
-      const l=await Drive.loadData(`ws_${k}.json`,root).catch(()=>null);
-      _db[k]=l||DEF[k];
-    }
-  }
-  async function _save(k){if(_root)await Drive.saveData(`ws_${k}.json`,_db[k],_root).catch(()=>{});}
-  function _nid(a){return a.length?Math.max(...a.map(x=>x.id))+1:1;}
-  // tareas
-  function getTareas(){return[..._db.tareas];}
-  async function agregarTarea(t){const n={...t,id:_nid(_db.tareas),creadoEn:new Date().toISOString(),done:false};_db.tareas.unshift(n);await _save('tareas');agregarActividad('tarea',`<strong>Tarea agregada:</strong> ${n.titulo}`,'📋','#e6f1fb');return n;}
-  async function actualizarTarea(id,c){const i=_db.tareas.findIndex(t=>t.id===id);if(i<0)return;_db.tareas[i]={..._db.tareas[i],...c};await _save('tareas');if(c.done!==undefined)agregarActividad('tarea',`Tarea <strong>${c.done?'completada':'reabierta'}:</strong> ${_db.tareas[i].titulo}`,c.done?'✓':'↩',c.done?'#e1f5ee':'#faeeda');return _db.tareas[i];}
-  async function eliminarTarea(id){const t=_db.tareas.find(t=>t.id===id);_db.tareas=_db.tareas.filter(t=>t.id!==id);await _save('tareas');if(t)agregarActividad('tarea',`Tarea <strong>eliminada:</strong> ${t.titulo}`,'🗑','#fcebeb');}
-  // clientes
-  function getClientes(){return[..._db.clientes];}
-  function getCliente(id){return _db.clientes.find(c=>c.id===id);}
-  async function agregarCliente(c){const n={...c,id:_nid(_db.clientes),creadoEn:new Date().toISOString()};_db.clientes.push(n);await _save('clientes');agregarActividad('cliente',`<strong>Cliente agregado:</strong> ${n.nombre}`,'👤','#faeeda');return n;}
-  async function actualizarCliente(id,c){const i=_db.clientes.findIndex(x=>x.id===id);if(i<0)return;_db.clientes[i]={..._db.clientes[i],...c};await _save('clientes');return _db.clientes[i];}
-  async function eliminarCliente(id){const c=_db.clientes.find(c=>c.id===id);_db.clientes=_db.clientes.filter(c=>c.id!==id);await _save('clientes');if(c)agregarActividad('cliente',`Cliente <strong>eliminado:</strong> ${c.nombre}`,'🗑','#fcebeb');}
-  // notas
-  function getNotas(){return[..._db.notas];}
-  function getNota(id){return _db.notas.find(n=>n.id===id);}
-  async function guardarNota(nota){
-    if(nota.id){const i=_db.notas.findIndex(n=>n.id===nota.id);if(i>=0)_db.notas[i]={..._db.notas[i],...nota,actualizadoEn:new Date().toISOString()};}
-    else{const n={...nota,id:_nid(_db.notas),creadoEn:new Date().toISOString(),actualizadoEn:new Date().toISOString()};_db.notas.unshift(n);agregarActividad('nota',`<strong>Nota creada:</strong> ${n.titulo||'Sin título'}`,'📝','#e6f1fb');}
-    await _save('notas');
-  }
-  async function eliminarNota(id){const n=_db.notas.find(n=>n.id===id);_db.notas=_db.notas.filter(n=>n.id!==id);await _save('notas');if(n)agregarActividad('nota',`Nota <strong>eliminada:</strong> ${n.titulo}`,'🗑','#fcebeb');}
-  // actividad
-  function getActividad(){return[..._db.actividad].sort((a,b)=>new Date(b.tiempo)-new Date(a.tiempo));}
-  async function agregarActividad(tipo,texto,icono,color){const a={id:_nid(_db.actividad),tipo,texto,icono,color,tiempo:new Date().toISOString()};_db.actividad.unshift(a);if(_db.actividad.length>100)_db.actividad=_db.actividad.slice(0,100);await _save('actividad');return a;}
-  function buscar(q){const l=q.toLowerCase();return{tareas:_db.tareas.filter(t=>t.titulo.toLowerCase().includes(l)),clientes:_db.clientes.filter(c=>c.nombre.toLowerCase().includes(l)),notas:_db.notas.filter(n=>n.titulo.toLowerCase().includes(l)||n.cuerpo.toLowerCase().includes(l))};}
-  return{init,getTareas,agregarTarea,actualizarTarea,eliminarTarea,getClientes,getCliente,agregarCliente,actualizarCliente,eliminarCliente,getNotas,getNota,guardarNota,eliminarNota,getActividad,agregarActividad,buscar};
-})();
+  DB.tareas[t.id] = t;
+  return t;
+}
 
-// ---------- UTILIDADES ----------
-const U={
-  fecha:s=>!s?'':new Date(s+'T12:00:00').toLocaleDateString('es-MX',{day:'numeric',month:'short'}),
-  fechaHora:iso=>!iso?'':new Date(iso).toLocaleString('es-MX',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}),
-  hace:iso=>{if(!iso)return'';const d=Date.now()-new Date(iso).getTime(),m=Math.floor(d/60000);if(m<1)return'ahora mismo';if(m<60)return`hace ${m}m`;const h=Math.floor(m/60);if(h<24)return`hace ${h}h`;return`hace ${Math.floor(h/24)}d`;},
-  hoy:()=>new Date().toLocaleDateString('en-CA',{timeZone:'America/Monterrey'}),
-  esc:s=>(s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;'),
-  iconoArchivo:m=>m==='application/vnd.google-apps.folder'?'📁':m==='application/pdf'?'📄':m&&m.startsWith('image/')?'🖼':m&&(m.includes('word')||m.includes('document'))?'📝':m&&(m.includes('sheet')||m.includes('excel'))?'📊':m&&m.includes('presentation')?'📋':m&&m.startsWith('video/')?'🎬':'📎',
-  peso:b=>{if(!b)return'';b=parseInt(b);if(b<1024)return b+' B';if(b<1048576)return Math.round(b/1024)+' KB';return(b/1048576).toFixed(1)+' MB';}
+function pasar(t, a, motivo, nota) {
+  const antes = JSON.stringify(t);
+  const de = t.con;
+  t.historial = [...(t.historial || []), { id: uid(), en: ahora(), por: YO, de, a, motivo: a === 'terminada' ? '' : (motivo || '') }];
+  if (esMiembro(a)) t.seguimiento = a; else if (esMiembro(de)) t.seguimiento = de;
+  t.con = a;
+  t.motivo = a === 'terminada' ? '' : (motivo || '');
+  t.desde = ahora();
+  t.terminada = a === 'terminada' ? ahora() : null;
+  if (nota && nota.trim()) t.comentarios = [...(t.comentarios || []), { id: uid(), por: YO, en: ahora(), t: nota.trim() }];
+  tocar(t); guardar();
+  const msg = a === 'terminada' ? 'Tarea terminada ✓' : `Pasada a ${nombreDe(a)}${motivo ? ' · ' + motivo : ''}`;
+  UI.toast(msg, () => { DB.tareas[t.id] = { ...JSON.parse(antes), upd: ahora() }; guardar(); });
+}
+
+function crearCat(col, nombre) {
+  nombre = nombre.trim(); if (!nombre) return null;
+  const ya = catalogo(col).find(x => x.nombre.toLowerCase() === nombre.toLowerCase());
+  if (ya) return ya.id;
+  const id = uid(); DB[col][id] = { id, nombre, upd: ahora() }; Sync.marcar(); return id;
+}
+
+// ---------- ESTADO DE LA INTERFAZ ----------
+const S = {
+  vista: ls.get('pend_vista', 'tablero'),
+  f: { q: '', cliente: '', area: '', prio: '', con: '' },
+  colMovil: 0,
+  orden: { k: 'limite', dir: 1 },
+  dw: null,            // id de la tarea abierta
+  cap: { cliente: null },
+  pasar: null          // estado del diálogo "Pasar a…"
 };
 
-// ---------- PERFIL ACTIVO (Santiago / Elizabeth) ----------
-// El perfil se determina ÚNICAMENTE por el correo/nombre de la sesión.
-// Se usa para mostrar las tareas DEL PERFIL en el Inicio.
-const Perfil=(()=>{
-  // Mapea correos conocidos a un id de perfil. Agrega aquí los correos reales del equipo.
-  const CORREOS={'santiago@ceneca.com.mx':'santiago','elizabeth@ceneca.com.mx':'elizabeth'};
-  function get(){
-    const u=Auth.getUser&&Auth.getUser();
-    if(u){
-      const email=(u.email||'').toLowerCase();
-      if(CORREOS[email])return CORREOS[email];
-      const nombre=(u.name||'').toLowerCase();
-      if(nombre.includes('eliz'))return 'elizabeth';
-      if(nombre.includes('santi'))return 'santiago';
-    }
-    return 'santiago';
+function pasaFiltro(t) {
+  const f = S.f;
+  if (f.cliente && t.cliente !== f.cliente) return false;
+  if (f.area && t.area !== f.area) return false;
+  if (f.prio && t.prioridad !== f.prio) return false;
+  if (f.con && t.con !== f.con) return false;
+  if (f.q) {
+    const q = f.q.toLowerCase();
+    const txt = [t.titulo, t.notas, nombreCat('clientes', t.cliente), ...subs(t).map(s => s.t)].join(' ').toLowerCase();
+    if (!txt.includes(q)) return false;
   }
-  function nombre(p){return({santiago:'Santiago',elizabeth:'Elizabeth'})[p||get()]||'Santiago';}
-  // ¿La tarea pertenece al perfil dado? Las de "ambos" cuentan para los dos.
-  function tareaEsDe(t,p){const per=p||get();return t.asignado===per||t.asignado==='ambos';}
-  return{get,nombre,tareaEsDe};
-})();
-
-// ---------- NAVEGACIÓN ----------
-const NAV=[
-  {id:'inicio',label:'Inicio',icon:'<rect x="1" y="1" width="6" height="6" rx="1.2"/><rect x="9" y="1" width="6" height="6" rx="1.2"/><rect x="1" y="9" width="6" height="6" rx="1.2"/><rect x="9" y="9" width="6" height="6" rx="1.2"/>'},
-  {id:'tareas',label:'Tareas',icon:'<path d="M2 4h12M2 8h8M2 12h10" stroke-linecap="round"/>'},
-  {id:'calendario',label:'Calendario',icon:'<rect x="1.5" y="2.5" width="13" height="12" rx="1.5"/><path d="M1.5 6.5h13M5 1v3M11 1v3" stroke-linecap="round"/>'},
-  {id:'archivos',label:'Archivos',icon:'<path d="M2 3.5A1.5 1.5 0 013.5 2h4.086a1.5 1.5 0 011.06.44l.915.914A1.5 1.5 0 0010.62 3.5H12.5A1.5 1.5 0 0114 5v7a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 12V3.5z"/>'},
-  {id:'correo',label:'Correo',icon:'<path d="M2 4l6 4 6-4M2 4h12v8H2V4z" stroke-linejoin="round"/>'},
-  {id:'clientes',label:'Clientes',icon:'<circle cx="6" cy="5" r="3"/><path d="M1 13c0-2.761 2.239-4 5-4s5 1.239 5 4" stroke-linecap="round"/>'},
-  {id:'actividad',label:'Actividad',icon:'<circle cx="8" cy="8" r="6.5"/><path d="M8 4.5v4l2.5 2" stroke-linecap="round"/>'},
-  {id:'notas',label:'Notas',icon:'<path d="M3 2h10a1 1 0 011 1v9l-3 3H3a1 1 0 01-1-1V3a1 1 0 011-1z"/><path d="M5 6h6M5 9h4" stroke-linecap="round"/>'},
-];
-
-
-// ---------- VISTA: INICIO ----------
-const Inicio={render(el){
-  const perfil=Perfil.get(),tareas=Data.getTareas(),clientes=Data.getClientes(),hoy=U.hoy();
-  // Tareas DEL PERFIL activo (incluye las asignadas a "Ambos")
-  const tareasPerfil=tareas.filter(t=>Perfil.tareaEsDe(t,perfil));
-  const abiertas=tareasPerfil.filter(t=>!t.done),vencidas=abiertas.filter(t=>t.fecha&&t.fecha<hoy),hoyTareas=abiertas.filter(t=>t.fecha===hoy);
-  const completadasPerfil=tareasPerfil.filter(t=>t.done).length;
-  const act=Data.getActividad().slice(0,5);
-  const h=parseInt(new Date().toLocaleString('en-US',{timeZone:'America/Monterrey',hour:'numeric',hour12:false})),saludo=h<12?'Buenos días':h<18?'Buenas tardes':'Buenas noches';
-  const stat=(valor,etiqueta,acento,icono)=>`<div class="sc" style="position:relative;overflow:hidden;padding-left:18px"><div style="position:absolute;left:0;top:0;bottom:0;width:3px;background:${acento}"></div><div style="display:flex;align-items:flex-start;justify-content:space-between"><div><div class="sn" style="color:${acento==='var(--border2)'?'inherit':acento}">${valor}</div><div class="sl">${etiqueta}</div></div><div style="font-size:18px;opacity:.35">${icono}</div></div></div>`;
-  el.innerHTML=`<div class="view active">
-    <div class="ph"><div><div class="pt">${saludo}, ${(Auth.getUser()?.name||'').split(' ')[0]} 👋</div><div class="psub">${new Date().toLocaleDateString('es-MX',{timeZone:'America/Monterrey',weekday:'long',day:'numeric',month:'long',year:'numeric'})}</div></div>
-    <div style="display:flex;gap:8px;align-items:center">
-      <button class="btn" onclick="Vistas.ir('tareas')">Ver tareas</button><button class="btn btnp" onclick="Tareas.nueva()">+ Nueva tarea</button>
-    </div></div>
-    <div class="stats">
-      ${stat(abiertas.length,'Tareas abiertas · '+Perfil.nombre(perfil),'var(--accent)','📋')}
-      ${stat(vencidas.length,'Vencidas',vencidas.length?'var(--red)':'var(--border2)','⏰')}
-      ${stat(hoyTareas.length,'Para hoy','var(--blue)','📅')}
-      ${stat(clientes.filter(c=>c.estatus==='activo').length,'Clientes activos','var(--amber)','🏢')}
-    </div>
-    <div class="two">
-      <div class="card"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px"><div class="slabel" style="margin:0">Próximas tareas</div>${completadasPerfil?`<span class="tag tg">${completadasPerfil} completadas</span>`:''}</div>${this._proximas(abiertas,hoy)}<button class="btn btns" style="margin-top:14px;width:100%;justify-content:center" onclick="Vistas.ir('tareas')">Ver todas las tareas →</button></div>
-      <div class="card"><div class="slabel">Actividad reciente</div>${act.length?act.map(a=>`<div class="ai" style="padding:9px 0"><div class="adot" style="background:${a.color};width:28px;height:28px;font-size:12px">${a.icono}</div><div><div class="at" style="font-size:13px">${a.texto}</div><div class="atm">${U.hace(a.tiempo)}</div></div></div>`).join(''):'<div class="empty" style="padding:24px"><div class="eic">🕐</div><div class="esub">Sin actividad aún</div></div>'}<button class="btn btns" style="margin-top:14px;width:100%;justify-content:center" onclick="Vistas.ir('actividad')">Ver toda la actividad →</button></div>
-    </div>
-    <div class="card" style="margin-top:16px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px"><div class="slabel" style="margin:0">Clientes</div><button class="btn btns" onclick="Vistas.ir('clientes')">Ver todos →</button></div><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px">${clientes.length?clientes.map(c=>{const ct=tareas.filter(t=>t.clienteId===c.id&&!t.done).length;return`<div style="display:flex;align-items:center;gap:12px;padding:12px;border:1px solid var(--border);border-radius:var(--r);cursor:pointer;transition:all .12s" onmouseover="this.style.boxShadow='var(--sh)';this.style.borderColor='var(--border2)'" onmouseout="this.style.boxShadow='none';this.style.borderColor='var(--border)'" onclick="Clientes.detalle(${c.id})"><div style="width:38px;height:38px;border-radius:10px;background:${c.color}22;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0">${c.emoji}</div><div style="min-width:0;flex:1"><div style="font-size:13px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.nombre}</div><div style="display:flex;align-items:center;gap:6px;margin-top:3px"><span class="sbadge ${c.estatus==='activo'?'sact':'sinact'}" style="font-size:10px;padding:1px 6px">${c.estatus==='activo'?'Activo':'Inactivo'}</span>${ct?`<span style="font-size:11px;color:var(--text3)">${ct} tarea${ct!==1?'s':''}</span>`:''}</div></div></div>`;}).join(''):''}<div style="display:flex;align-items:center;justify-content:center;gap:6px;padding:12px;border:1px dashed var(--border2);border-radius:var(--r);cursor:pointer;color:var(--text3);font-size:13px;min-height:62px" onclick="Clientes.nuevo()">+ Agregar cliente</div></div></div>
-  </div>`;
-},
-_proximas(abiertas,hoy){
-  const s=abiertas.filter(t=>t.fecha).sort((a,b)=>a.fecha.localeCompare(b.fecha)).slice(0,5);
-  if(!s.length)return'<div class="empty" style="padding:20px"><div class="etitle">¡Todo al día!</div></div>';
-  return s.map(t=>{const ov=t.fecha<hoy,cl=Data.getCliente(t.clienteId);return`<div class="ti"><div class="ck${t.done?' done':''}" onclick="Tareas.toggle(${t.id})"></div><div class="tbody"><div class="tn">${t.titulo}</div><div class="tmr">${cl?`<span class="tag tgr">${cl.emoji} ${cl.nombre}</span>`:''}<span class="dd${ov?' ov':''}">${ov?'Vencida · ':''}${U.fecha(t.fecha)}</span></div></div></div>`;}).join('');
-}};
-
-// ---------- VISTA: TAREAS ----------
-const Tareas={_filtro:'todas',_estado:'pendientes',_empresa:'',render(el){
-  const tareas=Data.getTareas(),cs=Data.getClientes(),perfil=Perfil.get();
-  el.innerHTML=`<div class="view active">
-    <div class="ph"><div><div class="pt">Tareas</div><div class="psub">${tareas.filter(t=>!t.done).length} abiertas · ${tareas.filter(t=>t.done).length} completadas</div></div><button class="btn btnp" onclick="Tareas.nueva()">+ Nueva tarea</button></div>
-    <div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap">${['todas','mías','elizabeth','vencidas','hoy'].map(f=>`<button class="btn btns${this._filtro===f?' btnp':''}" onclick="Tareas.setFiltro('${f}')">${({todas:'Todas',mías:'Mías ('+Perfil.nombre(perfil)+')',elizabeth:'Elizabeth',vencidas:'Vencidas',hoy:'Para hoy'})[f]}</button>`).join('')}</div>
-    <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;align-items:center">
-      <div style="display:flex;gap:4px;background:var(--surface2);padding:3px;border-radius:var(--r)">${[['pendientes','Pendientes'],['completadas','Completadas']].map(([e,lbl])=>`<button class="btn btns${this._estado===e?' btnp':''}" style="${this._estado===e?'':'background:transparent;border-color:transparent'}" onclick="Tareas.setEstado('${e}')">${lbl}</button>`).join('')}</div>
-      <select class="fi" style="width:auto;padding:6px 12px;font-size:12px" onchange="Tareas.setEmpresa(this.value)"><option value=""${this._empresa===''?' selected':''}>Todas las empresas</option>${cs.map(c=>`<option value="${c.id}"${this._empresa==String(c.id)?' selected':''}>${c.emoji} ${c.nombre}</option>`).join('')}</select>
-    </div>
-    <div class="card" style="padding:0;overflow:hidden"><div style="padding:14px 20px;border-bottom:1px solid var(--border)"><span class="slabel" style="margin:0">${this._filtradas(tareas).length} ${this._estado==='completadas'?'completadas':'tareas'}</span></div><div style="padding:0 20px" id="tlist"></div></div>
-  </div>`;this._lista();
-},_filtradas(tareas){const hoy=U.hoy(),perfil=Perfil.get();return tareas.filter(t=>{
-  // Filtro de estado: pendientes vs completadas (apartados separados)
-  if(this._estado==='completadas'&&!t.done)return false;
-  if(this._estado==='pendientes'&&t.done)return false;
-  // Filtro por empresa
-  if(this._empresa!==''&&String(t.clienteId)!==String(this._empresa))return false;
-  // Filtro por persona / vencimiento
-  if(this._filtro==='mías')return t.asignado==='ambos'||t.asignado===perfil;
-  if(this._filtro==='elizabeth')return t.asignado==='ambos'||t.asignado==='elizabeth';
-  if(this._filtro==='vencidas')return!t.done&&t.fecha&&t.fecha<hoy;
-  if(this._filtro==='hoy')return t.fecha===hoy;
   return true;
-});},
-_lista(){const el=document.getElementById('tlist');if(!el)return;const hoy=U.hoy();const f=this._filtradas(Data.getTareas()).sort((a,b)=>{if(a.done!==b.done)return a.done?1:-1;if(!a.fecha&&!b.fecha)return 0;if(!a.fecha)return 1;if(!b.fecha)return -1;return a.fecha.localeCompare(b.fecha);});
-if(!f.length){el.innerHTML=`<div class="empty"><div class="eic">✓</div><div class="etitle">${this._estado==='completadas'?'Sin tareas completadas aquí':'Sin tareas aquí'}</div></div>`;return;}
-el.innerHTML=f.map(t=>{const ov=!t.done&&t.fecha&&t.fecha<hoy,cl=Data.getCliente(t.clienteId);const ac=t.asignado==='elizabeth'?'tb':t.asignado==='ambos'?'tgr':'tg';const al={santiago:'Santiago',elizabeth:'Elizabeth',ambos:'Ambos'}[t.asignado]||t.asignado;return`<div class="ti"><div class="ck${t.done?' done':''}" onclick="Tareas.toggle(${t.id})"></div><div class="tbody"><div class="tn${t.done?' done':''}">${t.titulo}</div><div class="tmr"><span class="tag ${ac}">${al}</span>${cl?`<span class="tag tgr">${cl.emoji} ${cl.nombre}</span>`:''}${t.prioridad==='alta'&&!t.done?'<span class="tag tr">Alta</span>':''}${t.fecha?`<span class="dd${ov?' ov':''}">${ov?'Vencida · ':''}${U.fecha(t.fecha)}</span>`:''}</div></div><div class="tact"><button class="ibtn" onclick="Tareas.editar(${t.id})">✎</button><button class="ibtn" onclick="Tareas.eliminar(${t.id})">×</button></div></div>`;}).join('');},
-async toggle(id){const t=Data.getTareas().find(t=>t.id===id);if(t)await Data.actualizarTarea(id,{done:!t.done});Vistas.ir(Vistas.cur());},
-async eliminar(id){if(!confirm('¿Eliminar esta tarea?'))return;await Data.eliminarTarea(id);Vistas.ir(Vistas.cur());App.toast('Tarea eliminada');},
-setFiltro(f){this._filtro=f;this.render(document.getElementById('main'));},
-setEstado(e){this._estado=e;this.render(document.getElementById('main'));},
-setEmpresa(id){this._empresa=id;this.render(document.getElementById('main'));},
-nueva(){const cs=Data.getClientes();App.modal('Nueva tarea',`<div class="fg"><label class="fl">Título</label><input class="fi" id="mt" placeholder="Descripción de la tarea..." /></div><div class="fg"><label class="fl">Cliente</label><select class="fi" id="mc"><option value="">Sin cliente</option>${cs.map(c=>`<option value="${c.id}">${c.emoji} ${c.nombre}</option>`).join('')}</select></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="fg"><label class="fl">Fecha límite</label><input type="date" class="fi" id="mf" /></div><div class="fg"><label class="fl">Asignar a</label><select class="fi" id="ma"><option value="ambos">Ambos</option><option value="santiago">Santiago</option><option value="elizabeth">Elizabeth</option></select></div></div><div class="fg"><label class="fl">Prioridad</label><select class="fi" id="mp"><option value="normal">Normal</option><option value="alta">Alta</option><option value="baja">Baja</option></select></div>`,async()=>{const t=document.getElementById('mt').value.trim();if(!t){App.toast('Escribe un título');return false;}const nuevaTarea=await Data.agregarTarea({titulo:t,clienteId:parseInt(document.getElementById('mc').value)||null,fecha:document.getElementById('mf').value||null,asignado:document.getElementById('ma').value,prioridad:document.getElementById('mp').value});Vistas.ir(Vistas.cur());App.toast('Tarea agregada ✓');});},
-editar(id){const t=Data.getTareas().find(t=>t.id===id);if(!t)return;const cs=Data.getClientes();App.modal('Editar tarea',`<div class="fg"><label class="fl">Título</label><input class="fi" id="mt" value="${U.esc(t.titulo)}" /></div><div class="fg"><label class="fl">Cliente</label><select class="fi" id="mc"><option value="">Sin cliente</option>${cs.map(c=>`<option value="${c.id}" ${t.clienteId===c.id?'selected':''}>${c.emoji} ${c.nombre}</option>`).join('')}</select></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="fg"><label class="fl">Fecha límite</label><input type="date" class="fi" id="mf" value="${t.fecha||''}" /></div><div class="fg"><label class="fl">Asignar a</label><select class="fi" id="ma"><option value="ambos" ${t.asignado==='ambos'?'selected':''}>Ambos</option><option value="santiago" ${t.asignado==='santiago'?'selected':''}>Santiago</option><option value="elizabeth" ${t.asignado==='elizabeth'?'selected':''}>Elizabeth</option></select></div></div><div class="fg"><label class="fl">Prioridad</label><select class="fi" id="mp"><option value="normal" ${t.prioridad==='normal'?'selected':''}>Normal</option><option value="alta" ${t.prioridad==='alta'?'selected':''}>Alta</option><option value="baja" ${t.prioridad==='baja'?'selected':''}>Baja</option></select></div>`,async()=>{await Data.actualizarTarea(id,{titulo:document.getElementById('mt').value.trim(),clienteId:parseInt(document.getElementById('mc').value)||null,fecha:document.getElementById('mf').value||null,asignado:document.getElementById('ma').value,prioridad:document.getElementById('mp').value});Vistas.ir(Vistas.cur());App.toast('Tarea actualizada');});}};
+}
+const rankP = p => (PRIORIDADES.find(x => x.id === p) || { rank: 2 }).rank;
+function ordenar(a, b) {
+  const va = vencida(a) ? 0 : 1, vb = vencida(b) ? 0 : 1;
+  if (va !== vb) return va - vb;
+  const pa = rankP(a.prioridad), pb = rankP(b.prioridad);
+  if (pa !== pb) return pa - pb;
+  if (a.limite !== b.limite) return !a.limite ? 1 : !b.limite ? -1 : a.limite.localeCompare(b.limite);
+  return (a.desde || '').localeCompare(b.desde || '');
+}
 
-
-// ---------- VISTA: CALENDARIO (solo tareas) ----------
-const Calendario={
-  _a:new Date().getFullYear(),_m:new Date().getMonth(),_filtro:'todas',
-  async render(el){
-    el.innerHTML=`<div class="view active">
-      <div class="ph"><div><div class="pt">Calendario</div><div class="psub">Tareas del equipo organizadas por fecha</div></div>
-      <button class="btn btnp" onclick="Tareas.nueva()">+ Nueva tarea</button></div>
-      <div style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap">${[['santiago','Santiago'],['elizabeth','Elizabeth'],['todas','Todas']].map(([f,lbl])=>`<button class="btn btns${this._filtro===f?' btnp':''}" onclick="Calendario.setFiltro('${f}')">${lbl}</button>`).join('')}</div>
-      <div style="display:flex;gap:14px;margin-bottom:16px;flex-wrap:wrap">
-        <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)"><div style="width:12px;height:12px;border-radius:3px;background:var(--blue)"></div>Tareas Santiago</div>
-        <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)"><div style="width:12px;height:12px;border-radius:3px;background:#E0457B"></div>Tareas Elizabeth</div>
-        <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)"><div style="width:12px;height:12px;border-radius:3px;background:var(--accent)"></div>Tareas de ambos</div>
-      </div>
-      <div class="card">
-        <div class="calnav"><button class="cnb" onclick="Calendario.prev()">‹</button><div class="cmt" id="cmt"></div><button class="cnb" onclick="Calendario.next()">›</button></div>
-        <div class="calh">${['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'].map(d=>`<div>${d}</div>`).join('')}</div>
-        <div class="calg" id="calg"></div>
-      </div>
-      <div class="card" style="margin-top:16px">
-        <div class="slabel">Próximas tareas</div>
-        <div id="cal-proximas"></div>
-      </div>
-    </div>`;
-    this._grid();
-  },
-  _filtrarTareas(tareas){
-    return tareas.filter(t=>{
-      if(this._filtro==='todas')return true;
-      if(this._filtro==='elizabeth')return t.asignado==='elizabeth'||t.asignado==='ambos';
-      if(this._filtro==='santiago')return t.asignado==='santiago'||t.asignado==='ambos';
-      return true;
-    });
-  },
-  _colorTarea(t){
-    // Azul = Santiago, rosa = Elizabeth, verde = ambos
-    if(t.asignado==='elizabeth')return{bg:'#fce4ee',fg:'#B01E5A'};
-    if(t.asignado==='ambos')return{bg:'var(--accent-l)',fg:'var(--accent-d)'};
-    return{bg:'var(--blue-l)',fg:'#185FA5'};
-  },
-  setFiltro(f){this._filtro=f;this.render(document.getElementById('main'));},
-  _grid(){
-    const M=['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
-    const cmt=document.getElementById('cmt');
-    if(cmt)cmt.textContent=`${M[this._m]} ${this._a}`;
-    const tareas=this._filtrarTareas(Data.getTareas().filter(t=>!t.done&&t.fecha));
-    const hoy=U.hoy();
-    const first=new Date(this._a,this._m,1).getDay(),days=new Date(this._a,this._m+1,0).getDate(),prev=new Date(this._a,this._m,0).getDate();
-    let h='';
-    for(let i=0;i<first;i++)h+=`<div class="cday other"><div class="dnum">${prev-first+i+1}</div></div>`;
-    for(let d=1;d<=days;d++){
-      const ds=`${this._a}-${String(this._m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-      const dt=tareas.filter(t=>t.fecha===ds);
-      h+=`<div class="cday${ds===hoy?' today':''}"><div class="dnum">${d}</div>
-        ${dt.slice(0,3).map(t=>{const c=this._colorTarea(t);return`<div class="cev" style="background:${c.bg};color:${c.fg}" title="${U.esc(t.titulo)}">${t.titulo}</div>`;}).join('')}
-        ${dt.length>3?`<div class="cev cevg">+${dt.length-3} más</div>`:''}
-      </div>`;
-    }
-    const rem=42-first-days;
-    for(let i=1;i<=rem;i++)h+=`<div class="cday other"><div class="dnum">${i}</div></div>`;
-    const calg=document.getElementById('calg');
-    if(calg)calg.innerHTML=h;
-    this._renderProximas();
-  },
-  _renderProximas(){
-    const el=document.getElementById('cal-proximas');
-    if(!el)return;
-    const tareas=this._filtrarTareas(Data.getTareas().filter(t=>!t.done&&t.fecha)).sort((a,b)=>a.fecha.localeCompare(b.fecha)).slice(0,8);
-    const hoy=U.hoy();
-    if(!tareas.length){el.innerHTML='<div class="esub" style="padding:8px 0">Sin tareas próximas</div>';return;}
-    el.innerHTML=tareas.map(t=>{const c=this._colorTarea(t),cl=Data.getCliente(t.clienteId),ov=t.fecha<hoy;return`<div style="display:flex;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);align-items:center"><div style="width:8px;height:8px;border-radius:50%;background:${c.fg};flex-shrink:0"></div><div class="tbody"><div style="font-size:13px">${t.titulo}</div><div class="tmr" style="margin-top:2px">${cl?`<span class="tag tgr">${cl.emoji} ${cl.nombre}</span>`:''}<span class="tag" style="background:${c.bg};color:${c.fg}">${({santiago:'Santiago',elizabeth:'Elizabeth',ambos:'Ambos'})[t.asignado]||t.asignado}</span><span class="dd${ov?' ov':''}">${ov?'Vencida · ':''}${U.fecha(t.fecha)}</span></div></div></div>`;}).join('');
-  },
-  prev(){this._m--;if(this._m<0){this._m=11;this._a--;}this._grid();},
-  next(){this._m++;if(this._m>11){this._m=0;this._a++;}this._grid();}
+// ---------- ÍCONOS ----------
+const IC = {
+  check: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8.5l3.2 3L13 4.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  sub: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="3"/><path d="M5 8.2l2 2L11 6" stroke-linecap="round"/></svg>',
+  com: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3h10v7H7l-3 3v-3H3z" stroke-linejoin="round"/></svg>',
+  cal: '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="11" rx="2"/><path d="M2 7h12M5 1.5v3M11 1.5v3" stroke-linecap="round"/></svg>'
 };
 
-
-// ---------- VISTA: ARCHIVOS ----------
-const Archivos={_cur:null,_crumb:[],render(el){
-  el.innerHTML=`<div class="view active"><div class="ph"><div><div class="pt">Archivos</div><div class="psub">Almacenados en tu Google Drive</div></div><div style="display:flex;gap:8px"><button class="btn" onclick="Archivos.nuevaCarpeta()">+ Nueva carpeta</button><button class="btn btnp" onclick="document.getElementById('fup').click()">↑ Subir archivo</button></div></div>
-  <input type="file" id="fup" style="display:none" multiple onchange="Archivos.subir(this.files)" />
-  <div class="ft"><input class="si" placeholder="Buscar archivos..." /></div>
-  <div class="bc" id="bc"></div>
-  <div class="uz" id="uz" ondragover="event.preventDefault();this.classList.add('drag')" ondragleave="this.classList.remove('drag')" ondrop="event.preventDefault();this.classList.remove('drag');Archivos.subir(event.dataTransfer.files)" onclick="document.getElementById('fup').click()"><div style="font-size:28px;margin-bottom:8px">📂</div><div style="font-size:14px;font-weight:500">Arrastra archivos aquí o haz clic para subir</div><div style="font-size:12px;color:var(--text3);margin-top:4px">PDFs, documentos, imágenes — cualquier tipo de archivo</div></div>
-  <div id="fc"></div></div>`;this._loadRoot();
-},async _loadRoot(){const r=App.rootFolderId();if(!r){this._vacio('Conecta Google Drive para ver archivos');return;}this._cur=r;this._crumb=[{id:r,name:'Archivos'}];this._bc();await this._cargar(r);},
-async _cargar(id){document.getElementById('fc').innerHTML='<div style="padding:20px;text-align:center;color:var(--text3)">Cargando...</div>';let files=[];try{files=await Drive.listFiles(id);}catch(e){this._vacio('No se pudieron cargar los archivos');return;}this._archivos(files);},
-_archivos(files){const c=document.getElementById('fc');if(!files.length){c.innerHTML='<div class="empty"><div class="eic">📁</div><div class="etitle">Carpeta vacía</div><div class="esub">Sube un archivo o crea una subcarpeta</div></div>';return;}const carpetas=files.filter(f=>f.mimeType==='application/vnd.google-apps.folder'),docs=files.filter(f=>f.mimeType!=='application/vnd.google-apps.folder');c.innerHTML=`${carpetas.length?`<div class="slabel">Carpetas</div><div style="margin-bottom:16px">${carpetas.map(f=>this._fila(f,true)).join('')}</div>`:''}${docs.length?`<div class="slabel">Archivos (${docs.length})</div><div>${docs.map(f=>this._fila(f,false)).join('')}</div>`:''}`;},
-_fila(f,isC){const click=isC?`Archivos.abrirCarpeta('${f.id}','${U.esc(f.name)}')`:`Archivos.previsualizarArchivo('${f.id}','${U.esc(f.name)}','${f.mimeType}')`;return`<div class="frow" onclick="${click}"><div class="fic">${U.iconoArchivo(f.mimeType)}</div><div class="fnm">${f.name}</div><div class="fmt">${isC?'':U.peso(f.size)}</div><div class="fmt" style="margin-left:12px">${isC?'':U.fecha(f.modifiedTime)}</div>${!isC?`<div class="fract">${f.version&&parseInt(f.version)>1?`<button class="ibtn" onclick="event.stopPropagation();Archivos.versiones('${f.id}','${U.esc(f.name)}')" title="Historial">v${f.version}</button>`:''}<button class="ibtn" onclick="event.stopPropagation();Archivos.eliminar('${f.id}','${U.esc(f.name)}')">×</button></div>`:''}</div>`;},
-async abrirCarpeta(id,name){this._cur=id;this._crumb.push({id,name});this._bc();await this._cargar(id);},
-async previsualizarArchivo(id,name,mime){const pdf=mime==='application/pdf',img=mime&&mime.startsWith('image/');if(pdf||img){const url=Drive.downloadUrl(id);App.modal(name,pdf?`<iframe src="${url}" style="width:100%;height:500px;border:none;border-radius:6px"></iframe>`:`<img src="${url}" style="max-width:100%;border-radius:6px" />`,null,true);}else{const url=await Drive.webViewLink(id);if(url&&url!=='#')window.open(url,'_blank');else App.toast('No se pudo abrir la vista previa');}},
-async subir(files){if(!files.length)return;for(const f of files){App.toast(`Subiendo ${f.name}...`);try{await Drive.uploadFile(f,this._cur);await Data.agregarActividad('archivo',`<strong>Archivo subido:</strong> ${f.name}`,'📄','#e1f5ee');App.toast(`${f.name} subido`);}catch(e){App.toast(`Error al subir: ${f.name}`);}}await this._cargar(this._cur);},
-nuevaCarpeta(){App.modal('Nueva carpeta',`<div class="fg"><label class="fl">Nombre de la carpeta</label><input class="fi" id="fn" placeholder="ej. Acme Corp" /></div>`,async()=>{const n=document.getElementById('fn').value.trim();if(!n){App.toast('Escribe un nombre');return false;}await Drive.ensureFolder(n,this._cur);await this._cargar(this._cur);App.toast('Carpeta creada');});},
-async eliminar(id,name){if(!confirm(`¿Eliminar "${name}"?`))return;await Drive.deleteFile(id);await this._cargar(this._cur);App.toast('Archivo eliminado');},
-async versiones(id,name){const v=await Drive.getVersions(id);App.modal(`Historial de versiones — ${name}`,`<div style="font-size:13px;color:var(--text2);margin-bottom:14px">${v.length} versión${v.length!==1?'es':''} guardada${v.length!==1?'s':''} en Drive</div>${v.map((x,i)=>`<div style="display:flex;align-items:center;gap:12px;padding:9px 0;border-bottom:1px solid var(--border)"><span style="font-size:11px;font-family:'DM Mono',monospace;background:var(--surface2);padding:2px 7px;border-radius:4px">v${v.length-i}</span><span style="flex:1;font-size:13px">${U.fechaHora(x.modifiedTime)}</span><span style="font-size:12px;color:var(--text3)">${U.peso(x.size)}</span></div>`).join('')}`,null,true);},
-_bc(){const el=document.getElementById('bc');if(!el)return;el.innerHTML=this._crumb.map((b,i)=>i===this._crumb.length-1?`<span>${b.name}</span>`:`<a onclick="Archivos.irA(${i})">${b.name}</a><span style="color:var(--text3)">/</span>`).join('');},
-async irA(i){this._crumb=this._crumb.slice(0,i+1);this._cur=this._crumb[i].id;this._bc();await this._cargar(this._cur);},
-_vacio(m){const el=document.getElementById('fc');if(el)el.innerHTML=`<div class="empty"><div class="eic">📁</div><div class="esub">${m}</div></div>`;}};
-
-
-// ---------- VISTA: CORREO (Gmail real) ----------
-const Correo={
-  _emails:[],_loading:false,_activeId:null,
-  async render(el){
-    el.innerHTML=`<div class="view active">
-      <div class="ph"><div><div class="pt">Correo</div><div class="psub">Emails de tus clientes</div></div>
-      <button class="btn" onclick="Correo.cargar()">↻ Actualizar</button></div>
-      <div id="correo-body"><div style="text-align:center;padding:40px;color:var(--text3)">Cargando emails...</div></div>
-    </div>`;
-    await this.cargar();
-  },
-  async cargar(){
-    const el=document.getElementById('correo-body');
-    if(!el)return;
-    el.innerHTML='<div style="text-align:center;padding:40px;color:var(--text3)">Cargando...</div>';
-    try{
-      const token=Auth.getToken();
-      const res=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=20&q=in:inbox',{
-        headers:{Authorization:'Bearer '+token}
-      });
-      if(res.status===401){const ok=await Auth.manejarTokenExpirado();if(ok){this.cargar();}else{el.innerHTML='<div class="empty"><div class="eic">🔒</div><div class="etitle">Sesión expirada</div><div class="esub">Reconéctate para ver tus emails</div></div>';}return;}
-      const data=await res.json();
-      if(!data.messages||!data.messages.length){el.innerHTML='<div class="empty"><div class="eic">📭</div><div class="etitle">Sin emails</div></div>';return;}
-      // Cargar detalles de cada email
-      const emails=await Promise.all(data.messages.slice(0,10).map(m=>this._getEmail(m.id,token)));
-      this._emails=emails.filter(Boolean);
-      this._renderLista(el);
-    }catch(e){
-      console.error('Gmail error',e);
-      el.innerHTML='<div class="empty"><div class="eic">⚠️</div><div class="etitle">Error al cargar emails</div><div class="esub">Verifica que Gmail API esté activa</div></div>';
+// ---------- RENDER ----------
+const UI = {
+  render(opts = {}) {
+    if (!YO) return;
+    this.resumen();
+    this.vista();
+    if (S.dw) {
+      const dw = $('#drawer');
+      // No redibujar el panel mientras alguien escribe en él
+      if (!(opts.remoto && dw.contains(document.activeElement)) && opts.drawer !== false) Drawer.render();
     }
   },
-  async _getEmail(id,token){
-    try{
-      const res=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date`,{
-        headers:{Authorization:'Bearer '+token}
-      });
-      const m=await res.json();
-      const headers=m.payload?.headers||[];
-      const get=n=>headers.find(h=>h.name===n)?.value||'';
-      const from=get('From');
-      const name=from.includes('<')?from.split('<')[0].trim().replace(/"/g,''):from.split('@')[0];
-      const email=from.match(/<(.+)>/)?.[1]||from;
-      const unread=m.labelIds?.includes('UNREAD')||false;
-      // Match cliente
-      const clientes=Data.getClientes();
-      const cliente=clientes.find(c=>c.contacto&&email.toLowerCase().includes(c.contacto.split('@')[1]?.toLowerCase()))||null;
-      return{id:m.id,nombre:name,email,asunto:get('Subject')||'(Sin asunto)',snippet:m.snippet||'',fecha:get('Date'),noLeido:unread,clienteId:cliente?.id||null};
-    }catch(e){return null;}
+
+  estado(txt, err) { const e = $('#estado'); if (!e) return; e.textContent = txt; e.classList.toggle('err', !!err); },
+
+  cabecera() {
+    const u = Auth.getUser();
+    const nombre = DEMO ? nombreDe(YO) : ((u?.name || '').split(' ')[0] || nombreDe(YO));
+    const h = parseInt(new Date().toLocaleString('en-US', { timeZone: TZ, hour: 'numeric', hour12: false }));
+    $('#saludo').textContent = `${h < 12 ? 'Buenos días' : h < 19 ? 'Buenas tardes' : 'Buenas noches'}, ${nombre}`;
+    const f = new Date().toLocaleDateString('es-MX', { timeZone: TZ, weekday: 'long', day: 'numeric', month: 'long' });
+    $('#fecha').textContent = f.charAt(0).toUpperCase() + f.slice(1);
+    $('#avatar').textContent = iniciales(nombreDe(YO));
+    const para = $('#cap-para');
+    if (!para.options.length) {
+      // "Para mí" siempre primero y seleccionado
+      const orden = [MIEMBROS.find(m => m.id === YO), ...otros()].filter(Boolean);
+      para.innerHTML = orden.map(m => `<option value="${m.id}">${m.id === YO ? 'Para mí' : 'Para ' + esc(m.nombre)}</option>`).join('');
+      para.value = YO;
+    }
   },
-  _renderLista(el){
-    if(!this._emails.length){el.innerHTML='<div class="empty"><div class="eic">📭</div><div class="etitle">Sin emails</div></div>';return;}
-    el.innerHTML=`<div class="card" style="padding:0;overflow:hidden">${this._emails.map(e=>{
-      const cl=Data.getCliente(e.clienteId);
-      const initials=e.nombre.split(' ').map(n=>n[0]).join('').slice(0,2).toUpperCase();
-      return`<div class="email-row${e.noLeido?' unread':''}" onclick="Correo.abrirEmail('${e.id}','${U.esc(e.nombre)}','${U.esc(e.asunto)}')">
-        <div class="eav">${initials}</div>
-        <div style="flex:1;min-width:0">
-          <div style="display:flex;justify-content:space-between;align-items:center">
-            <span class="efrom${e.noLeido?';font-weight:600':''}">${e.nombre}</span>
-            <span class="etime">${this._fmtFecha(e.fecha)}</span>
-          </div>
-          <div class="esubj">${e.asunto}</div>
-          <div class="eprev">${e.snippet}</div>
-          <div style="margin-top:4px">${cl?`<span class="tag tgr">${cl.emoji} ${cl.nombre}</span>`:''}</div>
+
+  resumen() {
+    const h = hoy();
+    const mias = activas().filter(t => t.con === YO);
+    const venc = mias.filter(t => t.limite && t.limite < h).length;
+    const paraHoy = mias.filter(t => t.limite === h).length;
+    const corr = mias.filter(t => t.motivo === 'Correcciones').length;
+    const vobo = mias.filter(t => t.motivo === 'Vo.Bo.').length;
+    const espera = activas().filter(t => esEspera(t.con) && t.seguimiento === YO).length;
+    const n = mias.length;
+    let html = `<span class="res-main">${n ? `Tienes <b>${n}</b> pendiente${n === 1 ? '' : 's'}` : 'No tienes pendientes'}</span>`;
+    if (venc) html += `<span class="rchip red"><b>${venc}</b> vencida${venc === 1 ? '' : 's'}</span>`;
+    if (paraHoy) html += `<span class="rchip amb"><b>${paraHoy}</b> para hoy</span>`;
+    if (vobo) html += `<span class="rchip amb"><b>${vobo}</b> por dar Vo.Bo.</span>`;
+    if (corr) html += `<span class="rchip red"><b>${corr}</b> con correcciones</span>`;
+    if (espera) html += `<span class="rchip"><b>${espera}</b> esperando respuesta</span>`;
+    otros().forEach(m => { const c = activas().filter(t => t.con === m.id).length; html += `<span class="rchip">${esc(m.nombre)} tiene <b>${c}</b></span>`; });
+    if (!n) html += `<span class="rchip ok">Todo al día</span>`;
+    $('#resumen').innerHTML = html;
+  },
+
+  filtros() {
+    const f = S.f;
+    const sel = (k, vacioTxt, opciones) => `<select class="sel-mini" data-filtro="${k}"><option value="">${vacioTxt}</option>${opciones.map(o => `<option value="${o.id}" ${f[k] === o.id ? 'selected' : ''}>${esc(o.nombre)}</option>`).join('')}</select>`;
+    const personas = S.vista === 'lista' ? sel('con', 'Con quien sea', [...MIEMBROS, ...ESPERA]) : '';
+    const activo = f.q || f.cliente || f.area || f.prio || f.con;
+    $('#filtros').innerHTML = `
+      <input class="search" data-filtro="q" placeholder="Buscar…" value="${esc(f.q)}"/>
+      ${sel('cliente', 'Todos los clientes', catalogo('clientes'))}
+      ${sel('area', 'Todas las áreas', catalogo('areas'))}
+      ${S.vista !== 'terminadas' ? sel('prio', 'Cualquier prioridad', PRIORIDADES) : ''}
+      ${personas}
+      ${activo ? '<button class="f-clear" data-act="limpiar-f">Limpiar filtros</button>' : ''}`;
+  },
+
+  vista() {
+    document.querySelectorAll('#views button').forEach(b => b.classList.toggle('on', b.dataset.v === S.vista));
+    $('#captura').classList.toggle('hidden', S.vista === 'terminadas');
+    if (!$('#filtros').contains(document.activeElement)) this.filtros();
+    const el = $('#vista');
+    if (S.vista === 'lista') el.innerHTML = this.lista();
+    else if (S.vista === 'terminadas') el.innerHTML = this.terminadas();
+    else el.innerHTML = this.tablero();
+  },
+
+  columnas() {
+    return [
+      { id: YO, titulo: 'Mis tareas', corto: 'Mías' },
+      ...otros().map(m => ({ id: m.id, titulo: 'Tareas de ' + m.nombre, corto: m.nombre })),
+      { id: 'espera', titulo: 'En espera', corto: 'En espera', sub: 'Cliente o autoridad' }
+    ];
+  },
+  tareasDe(colId) {
+    return activas().filter(t => colId === 'espera' ? esEspera(t.con) : t.con === colId).filter(pasaFiltro).sort(ordenar);
+  },
+
+  tablero() {
+    const cols = this.columnas();
+    if (S.colMovil >= cols.length) S.colMovil = 0;
+    const tabs = `<div class="coltabs">${cols.map((c, i) => `<button class="${i === S.colMovil ? 'on' : ''}" data-act="colmovil" data-i="${i}"><i class="dot ${dotClase(c.id)}"></i><span class="nm">${esc(c.corto)}</span> <span class="muted">${this.tareasDe(c.id).length}</span></button>`).join('')}</div>`;
+    const html = cols.map((c, i) => {
+      const lista = this.tareasDe(c.id);
+      let cards;
+      if (!lista.length) cards = `<div class="empty">${c.id === 'espera' ? 'Nada esperando al cliente ni a la autoridad' : c.id === YO ? 'Nada pendiente. Arrastra aquí o usa la barra de arriba.' : 'Sin pendientes'}</div>`;
+      else if (c.id === 'espera') {
+        cards = ESPERA.map(e => { const g = lista.filter(t => t.con === e.id); return g.length ? `<div class="grp">${e.nombre} · ${g.length}</div>${g.map(t => this.card(t)).join('')}` : ''; }).join('');
+      } else cards = lista.map(t => this.card(t)).join('');
+      return `<section class="col ${i === S.colMovil ? 'act' : ''}" data-drop="${c.id}">
+        <div class="col-h"><i class="dot ${dotClase(c.id)}"></i><h2>${esc(c.titulo)}</h2><span class="cnt">${lista.length}</span>${c.sub ? `<span class="csub">${c.sub}</span>` : ''}</div>
+        <div class="cards">${cards}</div></section>`;
+    }).join('');
+    return tabs + `<div class="board" style="--cols:${cols.length}">${html}</div>`;
+  },
+
+  card(t) {
+    const h = hoy();
+    const st = subs(t), ok = st.filter(s => s.ok).length;
+    const cli = nombreCat('clientes', t.cliente), area = nombreCat('areas', t.area);
+    const ult = (t.historial || []).slice(-1)[0];
+    let quien = '';
+    if (esEspera(t.con)) quien = `Seguimiento: ${nombreDe(t.seguimiento)} · ${hace(t.desde)}`;
+    else if (ult && ult.por && ult.por !== t.con && ult.a === t.con) quien = `De ${nombreDe(ult.por)} · ${hace(t.desde)}`;
+    else quien = hace(t.desde || t.creada);
+    const prio = t.prioridad === 'urgente' ? '<span class="tag t-urg">Urgente</span>' : t.prioridad === 'alta' ? '<span class="tag t-alta">Alta</span>' : '';
+    const motivo = t.motivo ? `<span class="tag ${t.motivo === 'Correcciones' ? 't-warn' : 't-mot'}">${esc(t.motivo)}</span>` : '';
+    const due = t.limite ? `<span class="due ${t.limite < h ? 'ov' : t.limite === h ? 'hoy' : ''}">${IC.cal} ${fechaRel(t.limite)}</span>` : '';
+    return `<article class="card p-${t.prioridad}" draggable="true" data-act="abrir" data-id="${t.id}">
+      <div class="c-tags">${motivo}${prio}</div>
+      <h3 class="c-title">${esc(t.titulo)}</h3>
+      <div class="c-meta">${cli ? `<span class="chip">${esc(cli)}</span>` : ''}${area ? `<span class="chip ghost">${esc(area)}</span>` : ''}${due}${st.length ? `<span class="mini ${ok === st.length ? 'done' : ''}">${IC.sub} ${ok}/${st.length}</span>` : ''}${(t.comentarios || []).length ? `<span class="mini">${IC.com} ${t.comentarios.length}</span>` : ''}</div>
+      <div class="c-foot"><span class="age">${esc(quien)}</span><button class="pass" data-act="pasar" data-id="${t.id}">Pasar →</button></div>
+    </article>`;
+  },
+
+  lista() {
+    const o = S.orden;
+    const val = {
+      titulo: t => t.titulo.toLowerCase(), con: t => nombreDe(t.con), motivo: t => t.motivo || '~',
+      cliente: t => nombreCat('clientes', t.cliente) || '~', area: t => nombreCat('areas', t.area) || '~',
+      prioridad: t => rankP(t.prioridad), limite: t => t.limite || '9999', upd: t => t.upd || ''
+    };
+    const rows = activas().filter(pasaFiltro).sort((a, b) => { const x = val[o.k](a), y = val[o.k](b); return (x > y ? 1 : x < y ? -1 : ordenar(a, b)) * o.dir; });
+    const th = (k, l) => `<th data-act="orden" data-k="${k}" class="${o.k === k ? 's' + (o.dir < 0 ? ' up' : '') : ''}">${l}</th>`;
+    const h = hoy();
+    if (!rows.length) return `<div class="empty">No hay tareas con estos filtros</div>`;
+    return `<div class="tbl-wrap"><table><thead><tr>${th('titulo', 'Tarea')}${th('con', 'Con')}${th('motivo', 'Motivo')}${th('cliente', 'Cliente')}${th('area', 'Área')}${th('prioridad', 'Prioridad')}${th('limite', 'Límite')}<th>Avance</th>${th('upd', 'Último cambio')}</tr></thead><tbody>
+      ${rows.map(t => { const st = subs(t), ok = st.filter(s => s.ok).length; return `<tr class="row" data-act="abrir" data-id="${t.id}">
+        <td class="td-t">${esc(t.titulo)}</td>
+        <td><span class="holder"><i class="dot ${dotClase(t.con)}"></i>${nombreDe(t.con)}</span></td>
+        <td>${t.motivo ? `<span class="tag ${t.motivo === 'Correcciones' ? 't-warn' : 't-mot'}">${esc(t.motivo)}</span>` : '<span class="muted">—</span>'}</td>
+        <td>${esc(nombreCat('clientes', t.cliente)) || '<span class="muted">—</span>'}</td>
+        <td>${esc(nombreCat('areas', t.area)) || '<span class="muted">—</span>'}</td>
+        <td>${nombreDe2(t.prioridad)}</td>
+        <td>${t.limite ? `<span class="due ${t.limite < h ? 'ov' : t.limite === h ? 'hoy' : ''}">${fechaRel(t.limite)}</span>` : '<span class="muted">—</span>'}</td>
+        <td>${st.length ? `<span class="mini ${ok === st.length ? 'done' : ''}">${ok}/${st.length}</span>` : '<span class="muted">—</span>'}</td>
+        <td class="muted">${hace(t.upd)}</td></tr>`; }).join('')}
+      </tbody></table></div>`;
+  },
+
+  terminadas() {
+    const lista = tareas().filter(t => t.con === 'terminada').filter(pasaFiltro).sort((a, b) => (b.terminada || '').localeCompare(a.terminada || ''));
+    if (!lista.length) return `<div class="empty">Todavía no hay tareas terminadas${S.f.q || S.f.cliente || S.f.area ? ' con estos filtros' : ''}</div>`;
+    let dia = '', html = '';
+    lista.forEach(t => {
+      const d = diaISO(t.terminada || t.upd);
+      if (d !== dia) { dia = d; html += `<div class="done-day">${d === hoy() ? 'Hoy' : d === sumarDias(hoy(), -1) ? 'Ayer' : new Date(d + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' })}</div>`; }
+      const ult = (t.historial || []).filter(x => x.a === 'terminada').slice(-1)[0];
+      const cli = nombreCat('clientes', t.cliente);
+      html += `<div class="done-row" data-act="abrir" data-id="${t.id}"><span class="ok">${IC.check}</span>
+        <div class="dt"><div>${esc(t.titulo)}</div><div class="dm">${cli ? esc(cli) + ' · ' : ''}Terminada por ${nombreDe(ult?.por || t.seguimiento)} · ${fechaHora(t.terminada)}</div></div>
+        <button class="btn sm" data-act="reabrir" data-id="${t.id}">Reabrir</button></div>`;
+    });
+    return `<div class="done-list">${html}</div>`;
+  },
+
+  toast(msg, deshacer) {
+    const el = $('#toast');
+    el.innerHTML = `<span>${esc(msg)}</span>${deshacer ? '<button id="t-undo">Deshacer</button>' : ''}`;
+    el.classList.remove('hidden');
+    if (deshacer) $('#t-undo').onclick = () => { deshacer(); el.classList.add('hidden'); };
+    clearTimeout(el._t); el._t = setTimeout(() => el.classList.add('hidden'), deshacer ? 6000 : 2600);
+  }
+};
+const nombreDe2 = p => (PRIORIDADES.find(x => x.id === p) || { nombre: '—' }).nombre;
+
+// ---------- PANEL DE DETALLE ----------
+const Drawer = {
+  abrir(id) { S.dw = id; $('#drawer').classList.remove('hidden'); $('#scrim').classList.remove('hidden'); this.render(); $('#drawer').scrollTop = 0; },
+  cerrar() { S.dw = null; $('#drawer').classList.add('hidden'); $('#scrim').classList.add('hidden'); Pop.cerrar(); },
+  t() { return S.dw ? DB.tareas[S.dw] : null; },
+  render() {
+    const t = this.t();
+    if (!t || t.del) { this.cerrar(); return; }
+    const st = subs(t), ok = st.filter(s => s.ok).length;
+    const cli = nombreCat('clientes', t.cliente), area = nombreCat('areas', t.area);
+    const row = (k, v) => `<div class="pk">${k}</div><div style="display:flex;align-items:center;gap:4px;min-width:0">${v}</div>`;
+    const hist = (t.historial || []).slice().reverse().map(x => {
+      let txt;
+      if (x.motivo === 'Creada') txt = `<b>${nombreDe(x.por)}</b> la creó para ${nombreDe(x.a)}`;
+      else if (x.a === 'terminada') txt = `<b>${nombreDe(x.por)}</b> la marcó como terminada`;
+      else if (x.motivo === 'Reabierta') txt = `<b>${nombreDe(x.por)}</b> la reabrió para ${nombreDe(x.a)}`;
+      else txt = `<b>${nombreDe(x.por)}</b> la pasó a ${nombreDe(x.a)}${x.motivo ? ` · ${esc(x.motivo)}` : ''}`;
+      return `<div class="hi">${txt}<span class="when">${fechaHora(x.en)}</span></div>`;
+    }).join('');
+    $('#drawer').innerHTML = `
+      <div class="dw-head">
+        <span class="holder"><i class="dot ${dotClase(t.con)}"></i>${t.con === 'terminada' ? 'Terminada' : 'Con ' + nombreDe(t.con)}${t.motivo ? ` · <span class="tag ${t.motivo === 'Correcciones' ? 't-warn' : 't-mot'}">${esc(t.motivo)}</span>` : ''}</span>
+        <div class="dw-act">
+          ${t.con === 'terminada' ? `<button class="btn sm" data-act="reabrir" data-id="${t.id}">Reabrir</button>` : `<button class="btn sm pri" data-act="pasar" data-id="${t.id}">Pasar →</button>`}
+          <button class="icon" data-act="cerrar-dw" title="Cerrar">×</button>
         </div>
-      </div>`;
-    }).join('')}</div>`;
-  },
-  async abrirEmail(id,nombre,asunto){
-    const token=Auth.getToken();
-    let cuerpo='Cargando...';
-    try{
-      const res=await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`,{headers:{Authorization:'Bearer '+token}});
-      const m=await res.json();
-      // Marcar como leído
-      await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}/modify`,{
-        method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
-        body:JSON.stringify({removeLabelIds:['UNREAD']})
-      });
-      // Extraer cuerpo
-      const part=m.payload?.parts?.find(p=>p.mimeType==='text/plain')||m.payload;
-      const raw=part?.body?.data||'';
-      cuerpo=raw?atob(raw.replace(/-/g,'+').replace(/_/g,'/')):'(Sin contenido)';
-      if(cuerpo.length>800)cuerpo=cuerpo.slice(0,800)+'...';
-    }catch(e){cuerpo='No se pudo cargar el contenido.';}
-    const email=this._emails.find(e=>e.id===id);
-    const cs=Data.getClientes();
-    App.modal(asunto,`
-      <div style="font-size:13px;color:var(--text2);margin-bottom:12px">De: <strong>${nombre}</strong></div>
-      <div style="font-size:13px;line-height:1.7;color:var(--text);background:var(--surface2);padding:14px;border-radius:var(--rs);margin-bottom:16px;white-space:pre-wrap;max-height:300px;overflow-y:auto">${cuerpo}</div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btnp" onclick="Correo.responder('${id}','${U.esc(nombre)}','${U.esc(asunto)}')">Responder</button>
-        <button class="btn" onclick="App.closeModal();Correo.convertirTarea('${U.esc(asunto)}','${email?.clienteId||''}')">→ Convertir en tarea</button>
-      </div>`,null,true);
-  },
-  responder(id,nombre,asunto){
-    App.closeModal();
-    const reSubject=asunto.startsWith('Re:')?asunto:'Re: '+asunto;
-    App.modal(`Responder a ${nombre}`,`
-      <div class="fg"><label class="fl">Para</label><input class="fi" value="${nombre}" disabled /></div>
-      <div class="fg"><label class="fl">Asunto</label><input class="fi" id="mr-sub" value="${U.esc(reSubject)}" /></div>
-      <div class="fg"><label class="fl">Mensaje</label><textarea class="fi" id="mr-body" style="min-height:120px" placeholder="Escribe tu respuesta..."></textarea></div>
-    `,async()=>{
-      const body=document.getElementById('mr-body').value.trim();
-      if(!body){App.toast('Escribe un mensaje');return false;}
-      try{
-        const token=Auth.getToken();
-        // Obtener email original para el threadId y to
-        const orig=this._emails.find(e=>e.id===id);
-        const to=orig?.email||'';
-        const subject=document.getElementById('mr-sub').value;
-        const raw=btoa(`To: ${to}\r\nSubject: ${subject}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${body}`).replace(/\+/g,'-').replace(/\//g,'_');
-        await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send',{
-          method:'POST',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},
-          body:JSON.stringify({raw})
-        });
-        await Data.agregarActividad('correo',`<strong>Email enviado</strong> a ${to}`,'📧','#e6f1fb');
-        App.toast('Email enviado ✓');
-        await this.cargar();
-      }catch(e){App.toast('Error al enviar');console.error(e);}
-    });
-  },
-  convertirTarea(asunto,clienteId){
-    const cs=Data.getClientes();
-    App.modal('Convertir email en tarea',`
-      <div class="fg"><label class="fl">Título de la tarea</label><input class="fi" id="mt" value="Seguimiento: ${U.esc(asunto)}" /></div>
-      <div class="fg"><label class="fl">Cliente</label><select class="fi" id="mc"><option value="">Sin cliente</option>${cs.map(c=>`<option value="${c.id}" ${String(c.id)===String(clienteId)?'selected':''}>${c.emoji} ${c.nombre}</option>`).join('')}</select></div>
-      <div class="fg"><label class="fl">Fecha límite</label><input type="date" class="fi" id="mf" /></div>
-    `,async()=>{
-      const t=document.getElementById('mt').value.trim();
-      if(!t)return false;
-      await Data.agregarTarea({titulo:t,clienteId:parseInt(document.getElementById('mc').value)||null,fecha:document.getElementById('mf').value||null,asignado:'ambos',prioridad:'normal'});
-      App.toast('Tarea creada desde email');
-    });
-  },
-  _fmtFecha(dateStr){
-    if(!dateStr)return'';
-    try{
-      const d=new Date(dateStr);
-      const hoy=new Date();
-      if(d.toDateString()===hoy.toDateString())return d.toLocaleTimeString('es-MX',{hour:'2-digit',minute:'2-digit'});
-      return d.toLocaleDateString('es-MX',{day:'numeric',month:'short'});
-    }catch(e){return'';}
+      </div>
+      <textarea class="dw-title" data-f="titulo" rows="1" placeholder="Sin título">${esc(t.titulo)}</textarea>
+      <div class="props">
+        ${row('Cliente', `<button class="pv" data-act="combo" data-k="cliente">${cli ? `<span class="chip">${esc(cli)}</span>` : '<span class="ph">Elegir cliente</span>'}</button>`)}
+        ${row('Área', `<button class="pv" data-act="combo" data-k="area">${area ? `<span class="chip ghost">${esc(area)}</span>` : '<span class="ph">Elegir área</span>'}</button>`)}
+        ${row('Prioridad', `<select class="pv-in" data-f="prioridad">${PRIORIDADES.map(p => `<option value="${p.id}" ${t.prioridad === p.id ? 'selected' : ''}>${p.nombre}</option>`).join('')}</select>`)}
+        ${row('Fecha límite', `<input type="date" class="pv-in" data-f="limite" value="${t.limite || ''}"/>${t.limite ? ` <button class="icon sm" data-act="sin-fecha" title="Quitar fecha">×</button>` : ''}`)}
+        ${t.con !== 'terminada' && esEspera(t.con) ? row('Seguimiento', `<select class="pv-in" data-f="seguimiento">${MIEMBROS.map(m => `<option value="${m.id}" ${t.seguimiento === m.id ? 'selected' : ''}>${esc(m.nombre)}</option>`).join('')}</select>`) : ''}
+        ${row('Creada', `<span class="pv muted">${fechaISO(t.creada)} · ${nombreDe(t.creadaPor)}</span>`)}
+        ${t.terminada ? row('Terminada', `<span class="pv muted">${fechaHora(t.terminada)}</span>`) : ''}
+      </div>
+      <div class="dsec"><h4>Notas</h4><textarea class="notas" data-f="notas" placeholder="Detalles, contexto, ligas a documentos…">${esc(t.notas || '')}</textarea></div>
+      <div class="dsec"><h4>Subtareas ${st.length ? `<span>${ok}/${st.length}</span>` : ''}</h4>
+        ${st.length ? `<div class="progress"><i style="width:${Math.round(ok / st.length * 100)}%"></i></div>` : ''}
+        ${st.map(s => `<div class="st ${s.ok ? 'on' : ''}"><button class="ck ${s.ok ? 'on' : ''}" data-act="st-ok" data-sid="${s.id}">${s.ok ? IC.check : ''}</button><input class="st-t" data-st="${s.id}" value="${esc(s.t)}"/><button class="icon sm" data-act="st-del" data-sid="${s.id}" title="Quitar">×</button></div>`).join('')}
+        <input class="addin" data-add="sub" placeholder="+ Agregar subtarea (Enter)"/>
+      </div>
+      <div class="dsec"><h4>Comentarios ${(t.comentarios || []).length ? `<span>${t.comentarios.length}</span>` : ''}</h4>
+        ${(t.comentarios || []).map(c => `<div class="com"><div class="avatar av-${esc(c.por)}">${iniciales(nombreDe(c.por))}</div><div class="com-b"><div class="com-m"><b>${nombreDe(c.por)}</b> · ${fechaHora(c.en)}</div><div class="com-t">${esc(c.t)}</div></div></div>`).join('')}
+        <textarea class="addin" data-add="com" rows="2" placeholder="Escribe un comentario… (Enter para enviar, Shift+Enter salto de línea)"></textarea>
+      </div>
+      <div class="dsec"><h4>Historial</h4><div class="hist">${hist}</div></div>
+      <div class="dw-foot"><span class="muted" style="font-size:11px">Último cambio ${hace(t.upd)}</span><button class="btn sm danger" data-act="eliminar" data-id="${t.id}">Eliminar tarea</button></div>`;
+    ajustarAlto($('#drawer .dw-title'));
   }
 };
+function ajustarAlto(el) { if (!el) return; el.style.height = 'auto'; el.style.height = el.scrollHeight + 'px'; }
 
+// ---------- DIÁLOGO "PASAR A…" ----------
+const Modal = {
+  abrir(html) { $('#modalbox').innerHTML = html; $('#modal').classList.remove('hidden'); },
+  cerrar() { $('#modal').classList.add('hidden'); $('#modalbox').innerHTML = ''; S.pasar = null; }
+};
+function sugerirMotivo(t, a) {
+  if (a === 'cliente') return 'Respuesta';
+  if (esMiembro(a) && a !== YO && t.con === YO) return 'Vo.Bo.';
+  return '';
+}
+function abrirPasar(id, pre, mensaje) {
+  const t = DB.tareas[id]; if (!t) return;
+  let a = pre;
+  if (!a || a === t.con) a = esEspera(t.con) ? (t.seguimiento || YO) : (t.con === YO ? (otros()[0]?.id || 'cliente') : YO);
+  if (a === 'espera') a = 'cliente';
+  S.pasar = { id, a, motivo: sugerirMotivo(t, a), nota: '', mensaje };
+  renderPasar();
+}
+function renderPasar() {
+  const P = S.pasar, t = DB.tareas[P.id];
+  const destinos = [...MIEMBROS.filter(m => m.id !== t.con), ...ESPERA.filter(e => e.id !== t.con), { id: 'terminada', nombre: 'Terminada ✓' }];
+  const esMot = CONFIG.MOTIVOS.includes(P.motivo);
+  Modal.abrir(`
+    <div class="mt">Pasar tarea</div>
+    <div class="msub">${esc(t.titulo)}</div>
+    ${P.mensaje ? `<div class="msg">${esc(P.mensaje)}</div>` : ''}
+    <span class="lbl">¿A quién?</span>
+    <div class="opts">${destinos.map(d => `<button class="opt ${P.a === d.id ? 'on' : ''}" data-act="p-a" data-v="${d.id}"><i class="dot ${dotClase(d.id)}"></i>${d.id === YO ? 'Yo' : esc(d.nombre)}</button>`).join('')}</div>
+    ${P.a !== 'terminada' ? `
+      <span class="lbl">¿Qué falta?</span>
+      <div class="opts">${CONFIG.MOTIVOS.map(m => `<button class="opt sm ${P.motivo === m ? 'on' : ''}" data-act="p-m" data-v="${esc(m)}">${esc(m)}</button>`).join('')}</div>
+      <input class="fi" style="margin-top:8px" id="p-motivo" placeholder="u otro motivo…" value="${esMot ? '' : esc(P.motivo)}"/>` : ''}
+    <span class="lbl">Nota (opcional)</span>
+    <textarea class="fi" id="p-nota" placeholder="Se agrega como comentario">${esc(P.nota)}</textarea>
+    <div class="ma"><button class="btn" data-act="modal-x">Cancelar</button><button class="btn pri" data-act="p-ok">${P.a === 'terminada' ? 'Marcar como terminada' : 'Pasar a ' + (P.a === YO ? 'mí' : esc(nombreDe(P.a)))}</button></div>`);
+}
+function leerPasar() {
+  const P = S.pasar; if (!P) return;
+  const nota = $('#p-nota'); if (nota) P.nota = nota.value;
+  const mot = $('#p-motivo'); if (mot && mot.value.trim()) P.motivo = mot.value.trim();
+}
 
-// ---------- VISTA: CLIENTES ----------
-const Clientes={COLORES:['#1D9E75','#378ADD','#EF9F27','#E24B4A','#9B59B6','#E67E22'],EMOJIS:['🏢','📡','⚡','🎯','💡','🚀','🌟','🏆','💼','🔧'],
-render(el){const cs=Data.getClientes(),tareas=Data.getTareas(),notas=Data.getNotas();
-el.innerHTML=`<div class="view active"><div class="ph"><div><div class="pt">Clientes</div><div class="psub">${cs.filter(c=>c.estatus==='activo').length} activos · ${cs.filter(c=>c.estatus==='inactivo').length} inactivos</div></div><button class="btn btnp" onclick="Clientes.nuevo()">+ Agregar cliente</button></div>
-${cs.length?`<div class="cgrid">${cs.map(c=>{const ct=tareas.filter(t=>t.clienteId===c.id&&!t.done).length,cn=notas.filter(n=>n.clienteId===c.id).length;return`<div class="ccard" onclick="Clientes.detalle(${c.id})"><div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px"><div class="cav" style="background:${c.color}22">${c.emoji}</div><span class="sbadge ${c.estatus==='activo'?'sact':'sinact'}">${c.estatus==='activo'?'Activo':'Inactivo'}</span></div><div class="cnm">${c.nombre}</div><div class="csb">${c.sector||'Sin sector'}</div><div class="cst"><div class="csi"><strong>${ct}</strong> tareas abiertas</div><div class="csi"><strong>${cn}</strong> notas</div></div><div style="display:flex;gap:6px;margin-top:12px"><button class="btn btns" onclick="event.stopPropagation();Vistas.ir('archivos')" style="flex:1">Archivos</button><button class="btn btns" onclick="event.stopPropagation();Clientes.editar(${c.id})" style="flex:1">Editar</button></div></div>`;}).join('')}<div class="ccard" style="display:flex;align-items:center;justify-content:center;border:1px dashed var(--border2);color:var(--text3);font-size:13px;min-height:180px" onclick="Clientes.nuevo()">+ Agregar cliente</div></div>`:'<div class="empty"><div class="eic">👤</div><div class="etitle">Sin clientes aún</div></div>'}</div>`;
-},detalle(id){const c=Data.getCliente(id);if(!c)return;const tareas=Data.getTareas().filter(t=>t.clienteId===id),notas=Data.getNotas().filter(n=>n.clienteId===id),abiertas=tareas.filter(t=>!t.done),completadas=tareas.filter(t=>t.done),hoy=U.hoy();const fila=t=>`<div class="ti" style="padding:8px 0"><div class="ck${t.done?' done':''}" onclick="Clientes.toggleTarea(${t.id},${id})"></div><div class="tbody"><div class="tn${t.done?' done':''}">${t.titulo}</div>${t.fecha?`<div class="dd${!t.done&&t.fecha<hoy?' ov':''}" style="margin-top:2px">${!t.done&&t.fecha<hoy?'Vencida · ':''}${U.fecha(t.fecha)}</div>`:''}</div></div>`;App.modal(c.nombre,`<div style="display:flex;align-items:center;gap:12px;margin-bottom:20px"><div style="width:48px;height:48px;border-radius:12px;background:${c.color}22;display:flex;align-items:center;justify-content:center;font-size:22px">${c.emoji}</div><div><div style="font-size:16px;font-weight:500">${c.nombre}</div><div style="font-size:13px;color:var(--text2)">${c.sector||''}</div><span class="sbadge ${c.estatus==='activo'?'sact':'sinact'}" style="margin-top:4px">${c.estatus==='activo'?'Activo':'Inactivo'}</span></div></div>${c.contacto?`<div style="font-size:13px;color:var(--text2);margin-bottom:14px">📧 ${c.contacto}</div>`:''}${c.notas?`<div style="font-size:13px;color:var(--text2);background:var(--surface2);padding:10px 12px;border-radius:var(--rs);margin-bottom:16px">${c.notas}</div>`:''}<div class="slabel">Tareas abiertas (${abiertas.length})</div>${abiertas.length?abiertas.map(fila).join(''):'<div class="esub" style="padding:8px 0">Sin tareas abiertas</div>'}<div class="divider"></div><div class="slabel">Tareas completadas (${completadas.length})</div>${completadas.length?completadas.map(fila).join(''):'<div class="esub" style="padding:8px 0">Sin tareas completadas</div>'}<div class="divider"></div><div class="slabel">Notas (${notas.length})</div>${notas.length?notas.slice(0,3).map(n=>`<div style="padding:8px 0;border-bottom:1px solid var(--border)"><div style="font-size:13px;font-weight:500">${n.titulo}</div><div style="font-size:12px;color:var(--text3);margin-top:2px">${n.cuerpo.slice(0,80)}${n.cuerpo.length>80?'...':''}</div></div>`).join(''):'<div class="esub">Sin notas aún</div>'}`,null,true);},
-async toggleTarea(id,clienteId){const t=Data.getTareas().find(t=>t.id===id);if(t)await Data.actualizarTarea(id,{done:!t.done});this.detalle(clienteId);},
-nuevo(){App.modal('Agregar cliente',`<div class="fg"><label class="fl">Nombre de la empresa</label><input class="fi" id="cn" placeholder="Acme Corp" /></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="fg"><label class="fl">Sector</label><input class="fi" id="cs" placeholder="Tecnología" /></div><div class="fg"><label class="fl">Estatus</label><select class="fi" id="ce"><option value="activo">Activo</option><option value="inactivo">Inactivo</option></select></div></div><div class="fg"><label class="fl">Email de contacto</label><input class="fi" id="cc" placeholder="contacto@empresa.com" /></div><div class="fg"><label class="fl">Notas</label><textarea class="fi" id="cno" placeholder="Notas sobre este cliente..."></textarea></div><div class="fg"><label class="fl">Ícono</label><div style="display:flex;gap:6px;flex-wrap:wrap">${this.EMOJIS.map(e=>`<button type="button" style="font-size:20px;background:none;border:1px solid var(--border);border-radius:6px;padding:4px 8px;cursor:pointer" onclick="document.getElementById('ci').value='${e}';this.parentElement.querySelectorAll('button').forEach(b=>b.style.borderColor='var(--border)');this.style.borderColor='var(--accent)'">${e}</button>`).join('')}</div><input type="hidden" id="ci" value="🏢" /></div>`,async()=>{const n=document.getElementById('cn').value.trim();if(!n){App.toast('Escribe un nombre');return false;}const idx=Data.getClientes().length%this.COLORES.length;await Data.agregarCliente({nombre:n,sector:document.getElementById('cs').value.trim(),estatus:document.getElementById('ce').value,contacto:document.getElementById('cc').value.trim(),notas:document.getElementById('cno').value.trim(),color:this.COLORES[idx],emoji:document.getElementById('ci').value});Vistas.ir(Vistas.cur());App.toast('Cliente agregado');});},
-editar(id){const c=Data.getCliente(id);if(!c)return;App.modal('Editar cliente',`<div class="fg"><label class="fl">Nombre</label><input class="fi" id="cn" value="${U.esc(c.nombre)}" /></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px"><div class="fg"><label class="fl">Sector</label><input class="fi" id="cs" value="${U.esc(c.sector||'')}" /></div><div class="fg"><label class="fl">Estatus</label><select class="fi" id="ce"><option value="activo" ${c.estatus==='activo'?'selected':''}>Activo</option><option value="inactivo" ${c.estatus==='inactivo'?'selected':''}>Inactivo</option></select></div></div><div class="fg"><label class="fl">Email de contacto</label><input class="fi" id="cc" value="${U.esc(c.contacto||'')}" /></div><div class="fg"><label class="fl">Notas</label><textarea class="fi" id="cno">${U.esc(c.notas||'')}</textarea></div><button class="btn btnd btns" onclick="Clientes.eliminar(${id})" style="margin-top:8px">Eliminar cliente</button>`,async()=>{await Data.actualizarCliente(id,{nombre:document.getElementById('cn').value.trim(),sector:document.getElementById('cs').value.trim(),estatus:document.getElementById('ce').value,contacto:document.getElementById('cc').value.trim(),notas:document.getElementById('cno').value.trim()});Vistas.ir(Vistas.cur());App.toast('Cliente actualizado');});},
-async eliminar(id){App.closeModal();if(!confirm('¿Eliminar este cliente?'))return;await Data.eliminarCliente(id);Vistas.ir(Vistas.cur());App.toast('Cliente eliminado');}};
+// ---------- CATÁLOGO: CLIENTES Y ÁREAS ----------
+function abrirCatalogo() {
+  const uso = (col, id) => tareas().filter(t => t[col === 'clientes' ? 'cliente' : 'area'] === id && t.con !== 'terminada').length;
+  const bloque = (col, titulo, ph) => `<div><span class="lbl" style="margin-top:0">${titulo}</span>
+    ${catalogo(col).map(x => `<div class="cat-row"><input class="fi" data-cat="${col}" data-id="${x.id}" value="${esc(x.nombre)}"/><span class="n" title="Tareas activas">${uso(col, x.id)}</span><button class="icon sm" data-act="cat-del" data-col="${col}" data-id="${x.id}" title="Quitar de la lista">×</button></div>`).join('') || '<div class="muted" style="font-size:12px;padding:6px 0">Aún no hay</div>'}
+    <input class="addin" data-catadd="${col}" placeholder="${ph}"/></div>`;
+  Modal.abrir(`<div class="mt">Clientes y áreas</div>
+    <div class="msub">También se crean solos al escribir uno nuevo dentro de una tarea. Cambiar un nombre aquí lo cambia en todas.</div>
+    <div class="cat-grid">${bloque('clientes', 'Clientes', '+ Nuevo cliente (Enter)')}${bloque('areas', 'Áreas', '+ Nueva área (Enter)')}</div>
+    <div class="ma"><button class="btn pri" data-act="modal-x">Listo</button></div>`);
+}
 
-// ---------- VISTA: ACTIVIDAD ----------
-const Actividad={render(el){const a=Data.getActividad();el.innerHTML=`<div class="view active"><div class="ph"><div><div class="pt">Actividad</div><div class="psub">Todo lo que ha pasado en tu workspace</div></div></div><div class="card">${a.length?a.map(x=>`<div class="ai"><div class="adot" style="background:${x.color}">${x.icono}</div><div><div class="at">${x.texto}</div><div class="atm">${U.hace(x.tiempo)} · ${U.fechaHora(x.tiempo)}</div></div></div>`).join(''):'<div class="empty"><div class="eic">🕐</div><div class="etitle">Sin actividad aún</div><div class="esub">Las acciones que tú y Elizabeth realicen aparecerán aquí</div></div>'}</div></div>`;}};
+// ---------- COMBOBOX TIPO NOTION ----------
+const Pop = {
+  ctx: null,
+  abrir(ancla, ctx) {
+    this.ctx = { ...ctx, q: '', hl: 0 };
+    const el = $('#pop'); el.classList.remove('hidden');
+    const r = ancla.getBoundingClientRect();
+    const w = 260, x = Math.min(Math.max(8, r.left), window.innerWidth - w - 8);
+    const y = r.bottom + 4 + 300 > window.innerHeight ? Math.max(8, r.top - 300) : r.bottom + 4;
+    el.style.left = x + 'px'; el.style.top = y + 'px';
+    el.innerHTML = `<input id="pop-q" placeholder="${esc(ctx.ph)}"/><div class="pop-l" id="pop-l"></div>`;
+    this.lista(); setTimeout(() => $('#pop-q')?.focus(), 10);
+  },
+  opciones() {
+    const q = this.ctx.q.trim().toLowerCase();
+    const items = catalogo(this.ctx.col).filter(x => !q || x.nombre.toLowerCase().includes(q)).map(x => ({ id: x.id, label: x.nombre }));
+    const out = q ? [] : [{ id: null, label: this.ctx.vacio, ph: true }];
+    out.push(...items);
+    if (q && !catalogo(this.ctx.col).some(x => x.nombre.toLowerCase() === q)) out.push({ crear: this.ctx.q.trim(), label: `Crear «${this.ctx.q.trim()}»` });
+    return out;
+  },
+  lista() {
+    const ops = this.opciones(); this.ctx.ops = ops;
+    if (this.ctx.hl >= ops.length) this.ctx.hl = 0;
+    $('#pop-l').innerHTML = ops.map((o, i) => `<button class="pop-o ${o.crear ? 'new' : ''} ${o.id && o.id === this.ctx.valor ? 'sel' : ''} ${i === this.ctx.hl ? 'hl' : ''}" data-act="pop-pick" data-i="${i}">${o.ph ? `<span class="ph">${esc(o.label)}</span>` : esc(o.label)}</button>`).join('') || '<div class="muted" style="padding:8px">Escribe para crear</div>';
+  },
+  elegir(i) {
+    const o = this.ctx.ops[i]; if (!o) return;
+    const id = o.crear ? crearCat(this.ctx.col, o.crear) : o.id;
+    const cb = this.ctx.onPick; this.cerrar(); cb(id);
+  },
+  cerrar() { $('#pop').classList.add('hidden'); this.ctx = null; }
+};
 
-// ---------- VISTA: NOTAS ----------
-const Notas={_activa:null,_timer:null,render(el){const notas=Data.getNotas();el.innerHTML=`<div class="view active"><div class="ph"><div class="pt">Notas</div><button class="btn btnp" onclick="Notas.nueva()">+ Nueva nota</button></div><div class="nlay"><div class="nsb" id="nsb"></div><div class="ned" id="ned"><div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text3)">Selecciona una nota o crea una nueva</div></div></div></div>`;this._lista(notas);if(!this._activa&&notas.length)this._activa=notas[0].id;if(this._activa){const n=Data.getNota(this._activa);if(n)this._editor(n);}},
-_lista(notas){const el=document.getElementById('nsb');if(!el)return;if(!notas.length){el.innerHTML='<div class="empty" style="padding:20px"><div class="esub">Sin notas aún</div></div>';return;}el.innerHTML=`<div style="padding:10px 14px;border-bottom:1px solid var(--border)"><input class="si" style="width:100%;font-size:12px;padding:6px 10px" placeholder="Buscar notas..." oninput="Notas.buscar(this.value)" /></div>`+notas.map(n=>`<div class="nit${n.id===this._activa?' active':''}" onclick="Notas.abrir(${n.id})"><div class="nitt">${n.titulo||'Sin título'}</div><div class="nip">${n.cuerpo||'Nota vacía'}</div><div class="nid">${U.hace(n.actualizadoEn)}</div></div>`).join('');},
-abrir(id){this._activa=id;const n=Data.getNota(id);if(n)this._editor(n);this._lista(Data.getNotas());},
-_editor(n){const el=document.getElementById('ned');if(!el)return;const cs=Data.getClientes();el.innerHTML=`<div class="neh"><input class="nti" id="nt" value="${U.esc(n.titulo||'')}" placeholder="Título de la nota..." oninput="Notas.guardar()" /><select id="nc" onchange="Notas.guardar()" style="font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:var(--rs);background:var(--surface);color:var(--text2)"><option value="">Sin cliente</option>${cs.map(c=>`<option value="${c.id}" ${n.clienteId===c.id?'selected':''}>${c.emoji} ${c.nombre}</option>`).join('')}</select><button class="ibtn" style="color:var(--red)" onclick="Notas.eliminar(${n.id})">🗑</button></div><textarea class="nbi" id="nb" placeholder="Escribe aquí..." oninput="Notas.guardar()">${U.esc(n.cuerpo||'')}</textarea><div style="padding:8px 16px;border-top:1px solid var(--border);font-size:11px;color:var(--text3)">Última actualización ${U.fechaHora(n.actualizadoEn)} · Guardado automáticamente</div>`;},
-guardar(){clearTimeout(this._timer);this._timer=setTimeout(async()=>{if(!this._activa)return;await Data.guardarNota({id:this._activa,titulo:document.getElementById('nt')?.value||'',cuerpo:document.getElementById('nb')?.value||'',clienteId:parseInt(document.getElementById('nc')?.value)||null});this._lista(Data.getNotas());},800);},
-async nueva(){await Data.guardarNota({titulo:'',cuerpo:'',clienteId:null});this._activa=Data.getNotas()[0]?.id;this.render(document.getElementById('main'));},
-async eliminar(id){if(!confirm('¿Eliminar esta nota?'))return;this._activa=null;await Data.eliminarNota(id);this.render(document.getElementById('main'));App.toast('Nota eliminada');},
-buscar(q){const notas=q?Data.getNotas().filter(n=>n.titulo.toLowerCase().includes(q.toLowerCase())||n.cuerpo.toLowerCase().includes(q.toLowerCase())):Data.getNotas();this._lista(notas);}};
-
-
-const Vistas=(()=>{
-  let _cur='inicio';
-  function renderNav(){
-    document.getElementById('nav').innerHTML=NAV.map(n=>`<button class="ni${n.id===_cur?' active':''}" onclick="Vistas.ir('${n.id}')"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3">${n.icon}</svg><span>${n.label}</span></button>`).join('');
-  }
-  function ir(name){
-    _cur=name;renderNav();
-    const m=document.getElementById('main');
-    ({inicio:Inicio,tareas:Tareas,calendario:Calendario,archivos:Archivos,correo:Correo,clientes:Clientes,actividad:Actividad,notas:Notas})[name].render(m);
-  }
-  return{ir,renderNav,cur:()=>_cur};
-})();
-
-
-// ---------- APP BOOTSTRAP ----------
-const App=(()=>{
-  let _root=null,_dataFolder=null;
-  async function init(){
-    await Auth.init();
-    document.getElementById('signin').addEventListener('click',()=>Auth.signIn());
-    document.getElementById('signout').addEventListener('click',()=>Auth.signOut());
-    document.getElementById('modal').addEventListener('click',e=>{if(e.target===document.getElementById('modal'))closeModal();});
-    if(localStorage.getItem('ws_user')&&localStorage.getItem('ws_token'))Auth.signIn();
-  }
-  async function onSignedIn(user,token){
-    const u=user||Auth.getUser();
-    if(!u||!u.email){console.warn('No user, retrying...');setTimeout(()=>Auth.signIn(),500);return;}
-    document.getElementById('auth').classList.add('hidden');
-    document.getElementById('app').classList.remove('hidden');
-    document.getElementById('userpill').textContent=u.email||'';
-    try{
-      // Estructura en Drive (dentro de la carpeta compartida):
-      //   _data/      -> archivos ws_*.json (datos de la app)
-      //   Clientes/   -> carpetas de archivos por cliente
-      // Esto mantiene los datos compartidos entre Santiago y Elizabeth.
-      const base=CONFIG.SHARED_FOLDER_ID||await Drive.ensureFolder(CONFIG.DRIVE_ROOT_FOLDER);
-      // Carpeta de datos JSON
-      _dataFolder=await Drive.ensureFolder('_data',base);
-      // Carpeta de archivos de clientes (para la vista Archivos)
-      _root=await Drive.ensureFolder('Clientes',base);
-      await Data.init(_dataFolder);
+// ---------- EVENTOS ----------
+function alClic(e) {
+  const el = e.target.closest('[data-act]');
+  if (!$('#pop').classList.contains('hidden') && !e.target.closest('#pop') && !(el && el.dataset.act.startsWith('combo'))) Pop.cerrar();
+  if (!el) return;
+  const a = el.dataset.act, id = el.dataset.id;
+  const t = id ? DB.tareas[id] : Drawer.t();
+  switch (a) {
+    case 'vista': S.vista = el.dataset.v; ls.set('pend_vista', S.vista); if (S.vista !== 'lista') S.f.con = ''; UI.filtros(); UI.vista(); break;
+    case 'colmovil': S.colMovil = +el.dataset.i; UI.vista(); break;
+    case 'abrir': Drawer.abrir(id); break;
+    case 'cerrar-dw': Drawer.cerrar(); break;
+    case 'pasar': e.stopPropagation(); abrirPasar(id); break;
+    case 'p-a': leerPasar(); S.pasar.a = el.dataset.v; { const tt = DB.tareas[S.pasar.id]; if (!S.pasar.motivo || CONFIG.MOTIVOS.includes(S.pasar.motivo)) S.pasar.motivo = sugerirMotivo(tt, S.pasar.a) || S.pasar.motivo; } renderPasar(); break;
+    case 'p-m': leerPasar(); S.pasar.motivo = S.pasar.motivo === el.dataset.v ? '' : el.dataset.v; renderPasar(); break;
+    case 'p-ok': {
+      const P = S.pasar; leerPasar();
+      const mot = $('#p-motivo'); if (mot && !mot.value.trim() && !CONFIG.MOTIVOS.includes(P.motivo)) P.motivo = '';
+      const tt = DB.tareas[P.id]; Modal.cerrar(); pasar(tt, P.a, P.motivo, P.nota); break;
     }
-    catch(e){console.error('Drive init failed',e);toast('No se pudo conectar con Google Drive. Revisa permisos de la carpeta.',5000);await Data.init(null);}
-    Vistas.ir('inicio');
+    case 'modal-x': Modal.cerrar(); break;
+    case 'reabrir': e.stopPropagation(); pasar(t, t.seguimiento && esMiembro(t.seguimiento) ? t.seguimiento : YO, 'Reabierta'); break;
+    case 'eliminar': {
+      const copia = JSON.stringify(t); t.del = true; tocar(t); Drawer.cerrar(); guardar();
+      UI.toast('Tarea eliminada', () => { DB.tareas[t.id] = { ...JSON.parse(copia), del: false, upd: ahora() }; guardar(); }); break;
+    }
+    case 'sin-fecha': t.limite = null; tocar(t); guardar(); break;
+    case 'st-ok': {
+      const s = subs(t).find(x => x.id === el.dataset.sid); if (!s) break;
+      s.ok = !s.ok; tocar(t); guardar();
+      const st = subs(t);
+      if (s.ok && st.length && st.every(x => x.ok) && t.con !== 'terminada') abrirPasar(t.id, 'terminada', 'Completaste todas las subtareas. ¿La terminas o se la pasas a alguien?');
+      break;
+    }
+    case 'st-del': t.subtareas = subs(t).filter(x => x.id !== el.dataset.sid); tocar(t); guardar(); break;
+    case 'combo': {
+      const k = el.dataset.k, col = k === 'cliente' ? 'clientes' : 'areas';
+      Pop.abrir(el, { col, valor: t[k], vacio: k === 'cliente' ? 'Sin cliente' : 'Sin área', ph: k === 'cliente' ? 'Buscar o crear cliente…' : 'Buscar o crear área…', onPick: v => { t[k] = v; tocar(t); guardar(); } });
+      break;
+    }
+    case 'combo-cap':
+      Pop.abrir(el, { col: 'clientes', valor: S.cap.cliente, vacio: 'Sin cliente', ph: 'Buscar o crear cliente…', onPick: v => { S.cap.cliente = v; $('#cap-cli').textContent = nombreCat('clientes', v) || 'Sin cliente'; $('#cap-t').focus(); } });
+      break;
+    case 'pop-pick': Pop.elegir(+el.dataset.i); break;
+    case 'catalogo': abrirCatalogo(); break;
+    case 'cat-del': {
+      const x = DB[el.dataset.col][el.dataset.id]; x.del = true; x.upd = ahora(); guardar(); abrirCatalogo();
+      UI.toast(`«${x.nombre}» quitado de la lista`, () => { x.del = false; x.upd = ahora(); guardar(); if (!$('#modal').classList.contains('hidden')) abrirCatalogo(); }); break;
+    }
+    case 'orden': S.orden = S.orden.k === el.dataset.k ? { k: el.dataset.k, dir: -S.orden.dir } : { k: el.dataset.k, dir: 1 }; UI.vista(); break;
+    case 'limpiar-f': S.f = { q: '', cliente: '', area: '', prio: '', con: '' }; UI.filtros(); UI.vista(); break;
   }
-  function rootFolderId(){return _root;}
-  function modal(title,body,onConfirm,viewOnly){
-    const box=document.getElementById('modalbox');
-    box.innerHTML=`<div class="mt">${title}</div><div>${body}</div><div class="ma"><button class="btn" onclick="App.closeModal()">${viewOnly?'Cerrar':'Cancelar'}</button>${!viewOnly?'<button class="btn btnp" id="mconfirm">Guardar</button>':''}</div>`;
-    if(onConfirm)document.getElementById('mconfirm').addEventListener('click',async()=>{const r=await onConfirm();if(r!==false)closeModal();});
-    document.getElementById('modal').classList.remove('hidden');
-    setTimeout(()=>box.querySelector('input,textarea')?.focus(),50);
-  }
-  function closeModal(){document.getElementById('modal').classList.add('hidden');document.getElementById('modalbox').innerHTML='';}
-  function toast(msg,d=2500){const el=document.getElementById('toast');el.textContent=msg;el.classList.remove('hidden');clearTimeout(el._t);el._t=setTimeout(()=>el.classList.add('hidden'),d);}
-  // Aviso cuando la sesión de Google expiró y no se pudo renovar sola.
-  let _avisando=false;
-  function avisarReconectar(){
-    if(_avisando)return;_avisando=true;
-    modal('Sesión expirada','<div style="font-size:13.5px;color:var(--text2);line-height:1.6">Tu sesión de Google caducó (esto ocurre cada hora por seguridad). Reconéctate para seguir viendo y guardando tus datos.</div>',()=>{_avisando=false;Auth.reconectar();});
-    const b=document.getElementById('mconfirm');if(b)b.textContent='Reconectar con Google';
-  }
-  function _resetAviso(){_avisando=false;}
-  return{init,onSignedIn,rootFolderId,modal,closeModal,toast,avisarReconectar,_resetAviso};
-})();
+}
 
-window.addEventListener('DOMContentLoaded',()=>App.init());
+let tRender = null;
+function alEscribir(e) {
+  const el = e.target;
+  if (el.dataset.filtro === 'q') { S.f.q = el.value; UI.vista(); return; }
+  if (el.id === 'pop-q') { Pop.ctx.q = el.value; Pop.ctx.hl = 0; Pop.lista(); return; }
+  const t = Drawer.t(); if (!t) return;
+  if (el.dataset.f === 'titulo' || el.dataset.f === 'notas') {
+    t[el.dataset.f] = el.dataset.f === 'titulo' ? el.value.replace(/\n/g, ' ') : el.value;
+    if (el.dataset.f === 'titulo') ajustarAlto(el);
+    tocar(t); Sync.marcar();
+    clearTimeout(tRender); tRender = setTimeout(() => UI.render({ drawer: false }), 400);
+  } else if (el.dataset.st) {
+    const s = subs(t).find(x => x.id === el.dataset.st); if (s) { s.t = el.value; tocar(t); Sync.marcar(); }
+  }
+}
+function alCambiar(e) {
+  const el = e.target;
+  if (el.dataset.filtro && el.dataset.filtro !== 'q') { S.f[el.dataset.filtro] = el.value; UI.filtros(); UI.vista(); return; }
+  if (el.dataset.cat) {
+    const x = DB[el.dataset.cat][el.dataset.id], v = el.value.trim();
+    if (x && v && v !== x.nombre) { x.nombre = v; x.upd = ahora(); guardar(); }
+    return;
+  }
+  const t = Drawer.t(); if (!t) return;
+  if (['prioridad', 'limite', 'seguimiento'].includes(el.dataset.f)) { t[el.dataset.f] = el.value || null; tocar(t); guardar(); }
+  if (el.dataset.st) guardar({ drawer: false });
+}
+function alTecla(e) {
+  const el = e.target;
+  if (e.key === 'Escape') {
+    if (!$('#pop').classList.contains('hidden')) Pop.cerrar();
+    else if (!$('#modal').classList.contains('hidden')) Modal.cerrar();
+    else if (S.dw) Drawer.cerrar();
+    return;
+  }
+  if (el.id === 'pop-q') {
+    const n = Pop.ctx.ops.length;
+    if (e.key === 'ArrowDown') { e.preventDefault(); Pop.ctx.hl = (Pop.ctx.hl + 1) % n; Pop.lista(); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); Pop.ctx.hl = (Pop.ctx.hl - 1 + n) % n; Pop.lista(); }
+    if (e.key === 'Enter') { e.preventDefault(); Pop.elegir(Pop.ctx.hl); }
+    return;
+  }
+  if (e.key !== 'Enter') return;
+  const t = Drawer.t();
+  if (el.dataset.f === 'titulo') { e.preventDefault(); el.blur(); return; }
+  if (el.dataset.add === 'sub' && el.value.trim()) {
+    e.preventDefault();
+    t.subtareas = [...subs(t), { id: uid(), t: el.value.trim(), ok: false }]; tocar(t); guardar();
+    $('#drawer [data-add="sub"]')?.focus(); return;
+  }
+  if (el.dataset.add === 'com' && !e.shiftKey) {
+    e.preventDefault(); if (!el.value.trim()) return;
+    t.comentarios = [...(t.comentarios || []), { id: uid(), por: YO, en: ahora(), t: el.value.trim() }]; tocar(t); guardar();
+    $('#drawer [data-add="com"]')?.focus(); return;
+  }
+  if (el.dataset.st) { e.preventDefault(); $('#drawer [data-add="sub"]')?.focus(); return; }
+  if (el.dataset.catadd && el.value.trim()) {
+    e.preventDefault(); crearCat(el.dataset.catadd, el.value); guardar(); abrirCatalogo();
+    $(`#modalbox [data-catadd="${el.dataset.catadd}"]`)?.focus(); return;
+  }
+  if (el.dataset.cat) { e.preventDefault(); el.blur(); }
+}
+
+// Arrastrar y soltar entre columnas (escritorio)
+let arrastrando = null;
+function enlazarDnD() {
+  document.addEventListener('dragstart', e => {
+    const c = e.target.closest?.('.card'); if (!c) return;
+    arrastrando = c.dataset.id; c.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', arrastrando);
+  });
+  document.addEventListener('dragend', e => { e.target.closest?.('.card')?.classList.remove('dragging'); document.querySelectorAll('.col.drag').forEach(c => c.classList.remove('drag')); arrastrando = null; });
+  document.addEventListener('dragover', e => {
+    const col = e.target.closest?.('[data-drop]'); if (!col || !arrastrando) return;
+    e.preventDefault();
+    document.querySelectorAll('.col.drag').forEach(c => c !== col && c.classList.remove('drag'));
+    col.classList.add('drag');
+  });
+  document.addEventListener('drop', e => {
+    const col = e.target.closest?.('[data-drop]'); if (!col || !arrastrando) return;
+    e.preventDefault(); col.classList.remove('drag');
+    const t = DB.tareas[arrastrando], dest = col.dataset.drop;
+    if (!t) return;
+    if (dest === t.con || (dest === 'espera' && esEspera(t.con))) return;
+    abrirPasar(t.id, dest);
+  });
+}
+
+// ---------- APP ----------
+const App = {
+  async init() {
+    document.addEventListener('click', alClic);
+    document.addEventListener('input', alEscribir);
+    document.addEventListener('change', alCambiar);
+    document.addEventListener('keydown', alTecla);
+    $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') Modal.cerrar(); });
+    $('#signout').addEventListener('click', () => Auth.signOut());
+    $('#captura').addEventListener('submit', e => {
+      e.preventDefault();
+      const inp = $('#cap-t'), txt = inp.value.trim(); if (!txt) return;
+      const para = $('#cap-para').value || YO;
+      const t = nuevaTarea(txt, para, { cliente: S.cap.cliente });
+      inp.value = ''; guardar();
+      UI.toast(para === YO ? 'Tarea agregada' : `Tarea agregada para ${nombreDe(para)}`, () => { t.del = true; tocar(t); guardar(); });
+    });
+    enlazarDnD();
+    window.addEventListener('resize', () => Pop.cerrar());
+
+    if (DEMO) {
+      $('#auth-desc').innerHTML = '<em>Modo de prueba.</em> Los datos se guardan solo en este navegador.';
+      $('#auth-btns').innerHTML = `<div class="demo-btns">${MIEMBROS.map(m => `<button class="gbtn" data-demo="${m.id}">Entrar como ${esc(m.nombre)}</button>`).join('')}</div>`;
+      $('#auth-btns').addEventListener('click', e => { const b = e.target.closest('[data-demo]'); if (b) { ls.set('pend_demo_user', b.dataset.demo); this.onSignedIn(null); } });
+      if (ls.get('pend_demo_user', null)) this.onSignedIn(null);
+      return;
+    }
+    $('#signin').addEventListener('click', () => Auth.signIn());
+    if (localStorage.getItem('ws_user') && localStorage.getItem('ws_token')) Auth.signIn();
+  },
+
+  quienSoy(u) {
+    if (DEMO) return ls.get('pend_demo_user', MIEMBROS[0].id);
+    const email = (u?.email || '').toLowerCase();
+    const porCorreo = MIEMBROS.find(m => (m.correos || []).map(c => c.toLowerCase()).includes(email));
+    if (porCorreo) return porCorreo.id;
+    const recordado = ls.get('pend_quien_' + email, null);
+    if (recordado && esMiembro(recordado)) return recordado;
+    const nombre = (u?.name || '').toLowerCase();
+    const porNombre = MIEMBROS.find(m => nombre.includes(m.nombre.toLowerCase().slice(0, 4)));
+    return porNombre ? porNombre.id : null;
+  },
+
+  async onSignedIn(u) {
+    let yo = this.quienSoy(u);
+    if (!yo) {
+      // Correo desconocido: preguntar una sola vez y recordarlo
+      yo = await new Promise(res => {
+        Modal.abrir(`<div class="mt">¿Quién eres?</div><div class="msub">No reconozco el correo ${esc(u?.email || '')}. Elige tu nombre; lo recordaré en este navegador.</div>
+          <div class="opts">${MIEMBROS.map(m => `<button class="opt" data-quien="${m.id}">${esc(m.nombre)}</button>`).join('')}</div>`);
+        $('#modalbox').addEventListener('click', e => { const b = e.target.closest('[data-quien]'); if (b) { ls.set('pend_quien_' + (u?.email || '').toLowerCase(), b.dataset.quien); Modal.cerrar(); res(b.dataset.quien); } });
+      });
+    }
+    YO = yo;
+    $('#auth').classList.add('hidden');
+    $('#app').classList.remove('hidden');
+    UI.cabecera();
+    UI.estado('Cargando…');
+    try {
+      await Remoto.init();
+      DB = unir(vacio(), await Remoto.cargar() || vacio());
+      Sync.ok = true;
+    } catch (e) {
+      console.error(e);
+      UI.toast('No se pudo conectar con Google Drive. Revisa permisos de la carpeta.');
+      UI.estado('Sin conexión', true);
+    }
+    const sinAreas = !Object.keys(DB.areas).length;
+    sembrarAreas();
+    if (sinAreas && Sync.ok) Sync.marcar(); else UI.estado('Guardado ✓');
+    UI.render();
+    setInterval(() => { if (!document.hidden) Sync.correr(); }, CONFIG.SYNC_SEGUNDOS * 1000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) Sync.correr(); });
+    setInterval(() => UI.cabecera(), 5 * 60 * 1000);
+  },
+
+  _avisando: false,
+  avisarReconectar() {
+    if (this._avisando) return; this._avisando = true;
+    Modal.abrir(`<div class="mt">Sesión expirada</div><div class="msub">Tu sesión de Google caducó (pasa cada hora por seguridad). Reconéctate para seguir guardando; no se pierde nada de lo que hiciste.</div>
+      <div class="ma"><button class="btn pri" id="reco">Reconectar con Google</button></div>`);
+    $('#reco').onclick = () => { Modal.cerrar(); Auth.reconectar(); };
+  },
+  _resetAviso() { this._avisando = false; }
+};
+
+window.addEventListener('DOMContentLoaded', () => App.init());
