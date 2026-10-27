@@ -15,8 +15,8 @@ const CONFIG = {
   // Si alguien entra con un correo que no está aquí, la app le pregunta
   // quién es la primera vez y lo recuerda en ese navegador.
   MIEMBROS: [
-    { id: 'santiago',  nombre: 'Santiago',  correos: ['santiago@ceneca.com.mx'] },
-    { id: 'elizabeth', nombre: 'Elizabeth', correos: ['elizabeth@ceneca.com.mx'] }
+    { id: 'santiago',  nombre: 'Santiago',  iniciales: 'SC',  correos: ['santiago@ceneca.com.mx'] },
+    { id: 'elizabeth', nombre: 'Elizabeth', iniciales: 'ECR', correos: ['elizabeth@ceneca.com.mx'] }
   ],
 
   // Motivos rápidos al pasar una tarea (se puede escribir uno distinto)
@@ -24,6 +24,10 @@ const CONFIG = {
 
   // Áreas iniciales (se pueden agregar más desde la app)
   AREAS: ['Marcas', 'Corporativo', 'Laboral', 'Otro'],
+
+  // Plantilla de Word para el cómputo de horas (se puede editar en Word;
+  // respeta los campos entre llaves, p. ej. {razon_social}, {#filas}…{/filas})
+  PLANTILLA_HORAS: 'plantillas/horas.docx',
 
   // Cada cuántos segundos revisa si la otra persona hizo cambios
   SYNC_SEGUNDOS: 20,

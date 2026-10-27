@@ -197,7 +197,7 @@ function unirLista(a = [], b = []) {
 }
 function unirTarea(x, y) {
   const n = (y.upd || '') > (x.upd || '') ? y : x;
-  return { ...n, comentarios: unirLista(x.comentarios, y.comentarios), historial: unirLista(x.historial, y.historial) };
+  return { ...n, comentarios: unirLista(x.comentarios, y.comentarios), historial: unirLista(x.historial, y.historial), horas: unirLista(x.horas, y.horas) };
 }
 function unir(a, b) {
   const out = vacio();
@@ -334,6 +334,7 @@ function ordenar(a, b) {
 
 // ---------- ÍCONOS ----------
 const IC = {
+  reloj: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4.8V8l2.2 1.4" stroke-linecap="round"/></svg>',
   check: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8.5l3.2 3L13 4.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   sub: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="12" rx="3"/><path d="M5 8.2l2 2L11 6" stroke-linecap="round"/></svg>',
   com: '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3h10v7H7l-3 3v-3H3z" stroke-linejoin="round"/></svg>',
@@ -367,7 +368,8 @@ const UI = {
     if (!para.options.length) {
       // "Para mí" siempre primero y seleccionado
       const orden = [MIEMBROS.find(m => m.id === YO), ...otros()].filter(Boolean);
-      para.innerHTML = orden.map(m => `<option value="${m.id}">${m.id === YO ? 'Para mí' : 'Para ' + esc(m.nombre)}</option>`).join('');
+      para.innerHTML = orden.map(m => `<option value="${m.id}">${m.id === YO ? 'Para mí' : 'Para ' + esc(m.nombre)}</option>`).join('')
+        + `<option value="cliente">Ya enviada · esperando cliente</option><option value="autoridad">Ya enviada · esperando autoridad</option>`;
       para.value = YO;
     }
   },
@@ -454,13 +456,13 @@ const UI = {
     if (esEspera(t.con)) quien = `Seguimiento: ${nombreDe(t.seguimiento)} · ${hace(t.desde)}`;
     else if (ult && ult.por && ult.por !== t.con && ult.a === t.con) quien = `De ${nombreDe(ult.por)} · ${hace(t.desde)}`;
     else quien = hace(t.desde || t.creada);
-    const prio = t.prioridad === 'urgente' ? '<span class="tag t-urg">Urgente</span>' : t.prioridad === 'alta' ? '<span class="tag t-alta">Alta</span>' : '';
+    const prio = `<span class="tag t-${t.prioridad || 'media'}">${nombreDe2(t.prioridad || 'media')}</span>`;
     const motivo = t.motivo ? `<span class="tag ${t.motivo === 'Correcciones' ? 't-warn' : 't-mot'}">${esc(t.motivo)}</span>` : '';
     const due = t.limite ? `<span class="due ${t.limite < h ? 'ov' : t.limite === h ? 'hoy' : ''}">${IC.cal} ${fechaRel(t.limite)}</span>` : '';
     return `<article class="card p-${t.prioridad}" draggable="true" data-act="abrir" data-id="${t.id}">
       <div class="c-tags">${motivo}${prio}</div>
       <h3 class="c-title">${esc(t.titulo)}</h3>
-      <div class="c-meta">${cli ? `<span class="chip">${esc(cli)}</span>` : ''}${area ? `<span class="chip ghost">${esc(area)}</span>` : ''}${due}${st.length ? `<span class="mini ${ok === st.length ? 'done' : ''}">${IC.sub} ${ok}/${st.length}</span>` : ''}${(t.comentarios || []).length ? `<span class="mini">${IC.com} ${t.comentarios.length}</span>` : ''}</div>
+      <div class="c-meta">${cli ? `<span class="chip">${esc(cli)}</span>` : ''}${area ? `<span class="chip ghost">${esc(area)}</span>` : ''}${due}${st.length ? `<span class="mini ${ok === st.length ? 'done' : ''}">${IC.sub} ${ok}/${st.length}</span>` : ''}${(t.comentarios || []).length ? `<span class="mini">${IC.com} ${t.comentarios.length}</span>` : ''}${horasDe(t).length ? `<span class="mini">${IC.reloj} ${fmtMin(horasDe(t).reduce((a, h) => a + h.min, 0))}</span>` : ''}</div>
       <div class="c-foot"><span class="age">${esc(quien)}</span><button class="pass" data-act="pasar" data-id="${t.id}">Pasar →</button></div>
     </article>`;
   },
@@ -514,6 +516,20 @@ const UI = {
     clearTimeout(el._t); el._t = setTimeout(() => el.classList.add('hidden'), deshacer ? 6000 : 2600);
   }
 };
+// ---------- HORAS ----------
+// "0:30" · "1:15" · "1.5" (horas) · "45" (minutos) · "2" (horas)
+function leerTiempo(txt) {
+  txt = String(txt || '').trim().replace(',', '.');
+  if (!txt) return 0;
+  if (txt.includes(':')) { const [h, m] = txt.split(':'); return (parseInt(h) || 0) * 60 + (parseInt(m) || 0); }
+  const n = parseFloat(txt); if (isNaN(n)) return 0;
+  if (txt.includes('.')) return Math.round(n * 60);
+  return n < 10 ? n * 60 : n;
+}
+const fmtMin = m => `${Math.floor(m / 60)}:${String(Math.round(m % 60)).padStart(2, '0')}`;
+const horasDe = t => (t.horas || []).filter(h => !h.del).sort((a, b) => a.fecha.localeCompare(b.fecha));
+const inicialesDe = id => (MIEMBROS.find(m => m.id === id) || {}).iniciales || iniciales(nombreDe(id));
+
 const nombreDe2 = p => (PRIORIDADES.find(x => x.id === p) || { nombre: '—' }).nombre;
 
 // ---------- PANEL DE DETALLE ----------
@@ -559,6 +575,17 @@ const Drawer = {
         ${st.map(s => `<div class="st ${s.ok ? 'on' : ''}"><button class="ck ${s.ok ? 'on' : ''}" data-act="st-ok" data-sid="${s.id}">${s.ok ? IC.check : ''}</button><input class="st-t" data-st="${s.id}" value="${esc(s.t)}"/><button class="icon sm" data-act="st-del" data-sid="${s.id}" title="Quitar">×</button></div>`).join('')}
         <input class="addin" data-add="sub" placeholder="+ Agregar subtarea (Enter)"/>
       </div>
+      <div class="dsec"><h4>Horas ${horasDe(t).length ? `<span>${fmtMin(horasDe(t).reduce((a, h) => a + h.min, 0))} hrs</span>` : ''}</h4>
+        ${horasDe(t).map(h => `<div class="hr-row"><span class="hd">${fechaCorta(h.fecha)}</span><span class="hi2">${esc(inicialesDe(h.por))}</span><span class="ht">${esc(h.desc || t.titulo)}</span><span class="hh">${fmtMin(h.min)}</span><button class="icon sm" data-act="hr-del" data-hid="${h.id}" title="Quitar">×</button></div>`).join('')}
+        <div class="hr-add">
+          <input type="date" class="fi" id="hr-f" value="${hoy()}"/>
+          <select class="fi" id="hr-p">${MIEMBROS.map(m => `<option value="${m.id}" ${m.id === YO ? 'selected' : ''}>${esc(m.iniciales || m.nombre)}</option>`).join('')}</select>
+          <input class="fi" id="hr-t" placeholder="0:30" inputmode="decimal"/>
+          <input class="fi desc" id="hr-d" placeholder="Descripción (si no, usa el título)"/>
+          <button class="btn sm pri" data-act="hr-add">Agregar</button>
+        </div>
+        <div class="hr-chips">${['0:15', '0:30', '1:00', '2:00'].map(x => `<button class="opt sm" data-act="hr-chip" data-v="${x}">${x}</button>`).join('')}</div>
+      </div>
       <div class="dsec"><h4>Comentarios ${(t.comentarios || []).length ? `<span>${t.comentarios.length}</span>` : ''}</h4>
         ${(t.comentarios || []).map(c => `<div class="com"><div class="avatar av-${esc(c.por)}">${iniciales(nombreDe(c.por))}</div><div class="com-b"><div class="com-m"><b>${nombreDe(c.por)}</b> · ${fechaHora(c.en)}</div><div class="com-t">${esc(c.t)}</div></div></div>`).join('')}
         <textarea class="addin" data-add="com" rows="2" placeholder="Escribe un comentario… (Enter para enviar, Shift+Enter salto de línea)"></textarea>
@@ -572,8 +599,8 @@ function ajustarAlto(el) { if (!el) return; el.style.height = 'auto'; el.style.h
 
 // ---------- DIÁLOGO "PASAR A…" ----------
 const Modal = {
-  abrir(html) { $('#modalbox').innerHTML = html; $('#modal').classList.remove('hidden'); },
-  cerrar() { $('#modal').classList.add('hidden'); $('#modalbox').innerHTML = ''; S.pasar = null; }
+  abrir(html) { $('#modalbox').classList.remove('wide'); $('#modalbox').innerHTML = html; $('#modal').classList.remove('hidden'); },
+  cerrar() { $('#modal').classList.add('hidden'); $('#modalbox').innerHTML = ''; $('#modalbox').classList.remove('wide'); S.pasar = null; }
 };
 function sugerirMotivo(t, a) {
   if (a === 'cliente') return 'Respuesta';
@@ -658,6 +685,119 @@ const Pop = {
   cerrar() { $('#pop').classList.add('hidden'); this.ctx = null; }
 };
 
+function agregarHoras(t) {
+  const min = leerTiempo($('#hr-t').value);
+  if (!min) { UI.toast('Escribe el tiempo, p. ej. 0:30'); $('#hr-t').focus(); return; }
+  const fecha = $('#hr-f').value || hoy();
+  t.horas = [...(t.horas || []), { id: uid(), fecha, por: $('#hr-p').value || YO, min, desc: $('#hr-d').value.trim(), en: ahora(), upd: ahora() }];
+  tocar(t); guardar();
+  UI.toast(`${fmtMin(min)} hrs registradas`);
+  $('#hr-t')?.focus();
+}
+
+// ---------- CÓMPUTO DE HORAS → WORD ----------
+const MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+const Reporte = {
+  st: null,
+  abrir() {
+    const m = hoy().slice(0, 7);
+    const cli = S.f.cliente || catalogo('clientes').find(c => this.filasDe(c.id, m).length)?.id || catalogo('clientes')[0]?.id || '';
+    this.st = { cliente: cli, mes: m, fecha: '' };
+    this.cargarCliente(); this.render();
+  },
+  cargarCliente() {
+    const c = DB.clientes[this.st.cliente];
+    this.st.razon = c ? (c.razon || c.nombre.toUpperCase()) : '';
+    this.st.incluidas = c && c.incluidas != null ? c.incluidas : '';
+    const [y, mo] = this.st.mes.split('-').map(Number);
+    this.st.fecha = new Date(y, mo, 0).toLocaleDateString('en-CA');
+  },
+  filasDe(cli, mes) {
+    const out = [];
+    tareas().filter(t => t.cliente === cli).forEach(t => horasDe(t).filter(h => h.fecha.startsWith(mes)).forEach(h => out.push({ h, t })));
+    return out.sort((a, b) => a.h.fecha.localeCompare(b.h.fecha) || (a.h.en || '').localeCompare(b.h.en || ''));
+  },
+  leer() {
+    const v = id => $('#' + id)?.value ?? '';
+    const cli = v('rep-c'), mes = v('rep-m');
+    const cambioBase = cli !== this.st.cliente || mes !== this.st.mes;
+    this.st.razon = v('rep-r'); this.st.incluidas = v('rep-i'); this.st.fecha = v('rep-f');
+    if (cambioBase) { this.st.cliente = cli; this.st.mes = mes || hoy().slice(0, 7); this.cargarCliente(); }
+  },
+  render() {
+    const st = this.st, filas = st.cliente ? this.filasDe(st.cliente, st.mes) : [];
+    const total = filas.reduce((a, f) => a + f.h.min, 0);
+    const inc = parseFloat(st.incluidas) || 0, exc = inc ? Math.max(0, total - inc * 60) : 0;
+    const clientes = catalogo('clientes');
+    $('#modalbox').parentElement.classList.remove('hidden');
+    $('#modalbox').classList.add('wide');
+    $('#modalbox').innerHTML = `<div class="mt">Cómputo de horas</div>
+      <div class="msub">Junta las horas registradas en las tareas del cliente durante el mes y llena el formato de Word.</div>
+      ${clientes.length ? `<div class="rep-grid">
+        <div><label>Cliente</label><select class="fi" id="rep-c" data-rep="1">${clientes.map(c => `<option value="${c.id}" ${c.id === st.cliente ? 'selected' : ''}>${esc(c.nombre)}</option>`).join('')}</select></div>
+        <div><label>Mes</label><input type="month" class="fi" id="rep-m" data-rep="1" value="${st.mes}" style="color-scheme:dark"/></div>
+        <div><label>Razón social (ATENCIÓN:)</label><input class="fi" id="rep-r" data-repsum="1" value="${esc(st.razon)}"/></div>
+        <div><label>Horas incluidas al mes (vacío si no aplica)</label><input class="fi" id="rep-i" data-repsum="1" inputmode="decimal" value="${esc(st.incluidas)}" placeholder="p. ej. 16"/></div>
+        <div><label>Fecha del documento</label><input type="date" class="fi" id="rep-f" data-repsum="1" value="${st.fecha}" style="color-scheme:dark"/></div>
+      </div>
+      <div class="rep-tbl">${filas.length ? `<table><thead><tr><th>No.</th><th>Fecha</th><th>Asunto</th><th>Horas</th></tr></thead><tbody>
+        ${filas.map((f, i) => `<tr><td class="muted">${i + 1}</td><td style="white-space:nowrap">${fechaCorta(f.h.fecha)}</td><td>${esc(inicialesDe(f.h.por))} – ${esc(f.h.desc || f.t.titulo)}</td><td style="font-family:var(--mono)">${fmtMin(f.h.min)}</td></tr>`).join('')}
+        </tbody></table>` : `<div class="empty" style="border:none">No hay horas registradas para este cliente en ${MESES[+st.mes.slice(5, 7) - 1]}. Se registran dentro de cada tarea, en la sección «Horas».</div>`}</div>
+      <div class="rep-sum" id="rep-sum">${this.htmlResumen(total, inc, exc)}</div>`
+      : `<div class="empty">Primero da de alta clientes (desde una tarea o en «Clientes y áreas»).</div>`}
+      <div class="ma"><button class="btn" data-act="modal-x">Cerrar</button>${clientes.length ? `<button class="btn pri" data-act="rep-word" ${filas.length ? '' : 'disabled style="opacity:.4;pointer-events:none"'}>Descargar Word</button>` : ''}</div>`;
+  },
+  htmlResumen(total, inc, exc) {
+    return `<span class="rchip">Total <b>${fmtMin(total)} hrs</b></span>${inc ? `<span class="rchip">Incluidas <b>${fmtMin(inc * 60)}</b></span><span class="rchip ${exc ? 'red' : 'ok'}">${exc ? `Excedente <b>${fmtMin(exc)} hrs</b>` : 'Dentro de lo incluido'}</span>` : ''}`;
+  },
+  resumen() {
+    const st = this.st, total = this.filasDe(st.cliente, st.mes).reduce((a, f) => a + f.h.min, 0);
+    const inc = parseFloat(String(st.incluidas).replace(',', '.')) || 0;
+    const el = $('#rep-sum'); if (el) el.innerHTML = this.htmlResumen(total, inc, inc ? Math.max(0, total - inc * 60) : 0);
+  },
+  async libs() {
+    const cargar = src => new Promise((ok, err) => { const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = () => err(new Error('No se pudo cargar ' + src)); document.head.appendChild(s); });
+    if (!window.PizZip) await cargar('lib/pizzip.min.js');
+    if (!window.docxtemplater) await cargar('lib/docxtemplater.min.js');
+  },
+  async descargar(btn) {
+    this.leer();
+    const st = this.st, filas = this.filasDe(st.cliente, st.mes);
+    if (!filas.length) return;
+    const c = DB.clientes[st.cliente];
+    const inc = parseFloat(st.incluidas);
+    // Guardar razón social y horas incluidas en el cliente para la próxima vez
+    if (c && (c.razon !== st.razon || String(c.incluidas ?? '') !== String(st.incluidas))) { c.razon = st.razon; c.incluidas = isNaN(inc) ? null : inc; c.upd = ahora(); Sync.marcar(); }
+    const txt = btn.textContent; btn.textContent = 'Generando…';
+    try {
+      await this.libs();
+      const res = await fetch(CONFIG.PLANTILLA_HORAS, { cache: 'no-store' });
+      if (!res.ok) throw new Error('No encontré la plantilla ' + CONFIG.PLANTILLA_HORAS);
+      const zip = new PizZip(await res.arrayBuffer());
+      const doc = new window.docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
+      const [y, mo] = st.mes.split('-').map(Number);
+      const total = filas.reduce((a, f) => a + f.h.min, 0);
+      const f2 = n => String(n).padStart(2, '0');
+      doc.render({
+        fecha_doc: new Date(st.fecha + 'T12:00:00').toLocaleDateString('es-MX', { day: 'numeric', month: 'long', year: 'numeric' }),
+        razon_social: st.razon,
+        mes: `${MESES[mo - 1]} de ${y}`.toUpperCase(),
+        hay_incluidas: !isNaN(inc) && inc > 0, incluidas: inc, incluidas_hhmm: fmtMin((inc || 0) * 60),
+        total: fmtMin(total),
+        filas: filas.map((f, i) => { const [yy, mm, dd] = f.h.fecha.split('-'); return { n: i + 1, fecha: `${dd} / ${mm} / ${yy}`, iniciales: inicialesDe(f.h.por), asunto: f.h.desc || f.t.titulo, horas: fmtMin(f.h.min) }; })
+      });
+      const blob = doc.getZip().generate({ type: 'blob', mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+      const a = document.createElement('a');
+      const nombre = (c?.nombre || 'Cliente').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '');
+      a.href = URL.createObjectURL(blob); a.download = `Horas_Servicios_${nombre}_${MESES[mo - 1]}_${y}.docx`;
+      document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      UI.toast('Word generado ✓');
+    } catch (e) {
+      console.error(e); UI.toast('No se pudo generar el Word: ' + e.message);
+    } finally { btn.textContent = txt; }
+  }
+};
+
 // ---------- EVENTOS ----------
 function alClic(e) {
   const el = e.target.closest('[data-act]');
@@ -703,6 +843,15 @@ function alClic(e) {
       break;
     case 'pop-pick': Pop.elegir(+el.dataset.i); break;
     case 'catalogo': abrirCatalogo(); break;
+    case 'hr-chip': $('#hr-t').value = el.dataset.v; $('#hr-d').focus(); break;
+    case 'hr-add': agregarHoras(t); break;
+    case 'hr-del': {
+      const h = (t.horas || []).find(x => x.id === el.dataset.hid); if (!h) break;
+      h.del = true; h.upd = ahora(); tocar(t); guardar();
+      UI.toast('Registro de horas quitado', () => { h.del = false; h.upd = ahora(); tocar(t); guardar(); }); break;
+    }
+    case 'horas': $('#menu').classList.add('hidden'); $('#burger').setAttribute('aria-expanded', 'false'); Reporte.abrir(); break;
+    case 'rep-word': Reporte.descargar(el); break;
     case 'cat-del': {
       const x = DB[el.dataset.col][el.dataset.id]; x.del = true; x.upd = ahora(); guardar(); abrirCatalogo();
       UI.toast(`«${x.nombre}» quitado de la lista`, () => { x.del = false; x.upd = ahora(); guardar(); if (!$('#modal').classList.contains('hidden')) abrirCatalogo(); }); break;
@@ -716,6 +865,7 @@ let tRender = null;
 function alEscribir(e) {
   const el = e.target;
   if (el.dataset.filtro === 'q') { S.f.q = el.value; UI.vista(); return; }
+  if (el.dataset.repsum) { Reporte.leer(); Reporte.resumen(); return; }
   if (el.id === 'pop-q') { Pop.ctx.q = el.value; Pop.ctx.hl = 0; Pop.lista(); return; }
   const t = Drawer.t(); if (!t) return;
   if (el.dataset.f === 'titulo' || el.dataset.f === 'notas') {
@@ -729,6 +879,8 @@ function alEscribir(e) {
 }
 function alCambiar(e) {
   const el = e.target;
+  if (el.dataset.rep) { Reporte.leer(); Reporte.render(); return; }
+  if (el.dataset.repsum) { Reporte.leer(); Reporte.resumen(); return; }
   if (el.dataset.filtro && el.dataset.filtro !== 'q') { S.f[el.dataset.filtro] = el.value; UI.filtros(); UI.vista(); return; }
   if (el.dataset.cat) {
     const x = DB[el.dataset.cat][el.dataset.id], v = el.value.trim();
@@ -762,6 +914,7 @@ function alTecla(e) {
     t.subtareas = [...subs(t), { id: uid(), t: el.value.trim(), ok: false }]; tocar(t); guardar();
     $('#drawer [data-add="sub"]')?.focus(); return;
   }
+  if (['hr-t', 'hr-d'].includes(el.id)) { e.preventDefault(); agregarHoras(t); return; }
   if (el.dataset.add === 'com' && !e.shiftKey) {
     e.preventDefault(); if (!el.value.trim()) return;
     t.comentarios = [...(t.comentarios || []), { id: uid(), por: YO, en: ahora(), t: el.value.trim() }]; tocar(t); guardar();
@@ -809,13 +962,19 @@ const App = {
     document.addEventListener('keydown', alTecla);
     $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') Modal.cerrar(); });
     $('#signout').addEventListener('click', () => Auth.signOut());
+    // Menú de hamburguesa (esquina superior izquierda)
+    const burger = $('#burger'), menu = $('#menu');
+    const toggleMenu = abrir => { menu.classList.toggle('hidden', !abrir); burger.setAttribute('aria-expanded', abrir ? 'true' : 'false'); };
+    burger.addEventListener('click', e => { e.stopPropagation(); toggleMenu(menu.classList.contains('hidden')); });
+    document.addEventListener('click', e => { if (!e.target.closest('#menu')) toggleMenu(false); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') toggleMenu(false); });
     $('#captura').addEventListener('submit', e => {
       e.preventDefault();
       const inp = $('#cap-t'), txt = inp.value.trim(); if (!txt) return;
       const para = $('#cap-para').value || YO;
-      const t = nuevaTarea(txt, para, { cliente: S.cap.cliente });
+      const t = nuevaTarea(txt, para, { cliente: S.cap.cliente, motivo: para === 'cliente' ? 'Respuesta' : '' });
       inp.value = ''; guardar();
-      UI.toast(para === YO ? 'Tarea agregada' : `Tarea agregada para ${nombreDe(para)}`, () => { t.del = true; tocar(t); guardar(); });
+      UI.toast(para === YO ? 'Tarea agregada' : esEspera(para) ? `Agregada a En espera (${nombreDe(para)})` : `Tarea agregada para ${nombreDe(para)}`, () => { t.del = true; tocar(t); guardar(); });
     });
     enlazarDnD();
     window.addEventListener('resize', () => Pop.cerrar());
